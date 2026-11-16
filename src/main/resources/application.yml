@@ -91,6 +91,8 @@ gateway:
     max-request-bytes: 10485760
     connect-timeout: 5s
     trusted-proxies: ${GATEWAY_TRUSTED_PROXIES:}
+    # Names the serving instance in X-Gateway-Instance; for demos (the visualizer), off in production.
+    expose-instance-header: ${GATEWAY_EXPOSE_INSTANCE_HEADER:false}
   rate-limit:
     mode: valkey
     probe-interval: 1s

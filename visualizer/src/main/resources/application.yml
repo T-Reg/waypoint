@@ -1,0 +1,52 @@
+server:
+  port: ${PORT:8090}
+  shutdown: graceful
+
+spring:
+  application:
+    name: waypoint-visualizer
+  # "compose" targets the local docker-compose stack; set SPRING_PROFILES_ACTIVE=app-platform on DigitalOcean.
+  profiles:
+    default: compose
+  threads:
+    virtual:
+      enabled: true
+  main:
+    banner-mode: off
+  mvc:
+    async:
+      request-timeout: -1
+  web:
+    resources:
+      cache:
+        # Jar entries all carry a fixed 1980 timestamp, so Last-Modified can't tell versions apart.
+        use-last-modified: false
+        cachecontrol:
+          no-cache: true
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+# Defaults match docker-compose.yml (visualizer service, "viz" profile).
+visualizer:
+  issuer:
+    key-file: ${VISUALIZER_ISSUER_KEY_FILE:/keys/issuer.private.jwk.json}
+    key: ${VISUALIZER_ISSUER_KEY:}
+    name: ${VISUALIZER_ISSUER_NAME:waypoint-issuer}
+    audience: ${VISUALIZER_ISSUER_AUDIENCE:gateway}
+  default-target: lb
+  allowed-tenants: ${VISUALIZER_ALLOWED_TENANTS:acme,globex,initech,loadtest,umbrella}
+  max-ttl: 5m
+  request-timeout: 10s
+  max-requests-per-run: 200
+  max-concurrency: 20
+  access:
+    required: ${VISUALIZER_ACCESS_REQUIRED:false}
+    username: ${VISUALIZER_ACCESS_USERNAME:demo}
+    password: ${VISUALIZER_ACCESS_PASSWORD:}

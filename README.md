@@ -26,9 +26,20 @@ docker compose --env-file dev-keys/compose.env build gateway-1
 docker compose --env-file dev-keys/compose.env up -d
 ```
 
-This starts PostgreSQL, Valkey, two gateways behind HAProxy (`localhost:8080`) and a stub upstream. The seed in `deploy/seed.yaml` creates the routes `/weather` and `/maps` and the tenants `acme` and `globex`. It's applied only to an empty database. Gateway 1's admin and management listeners are on `localhost:18081` and `localhost:18082`.
+This starts PostgreSQL, Valkey, two gateways behind HAProxy (`localhost:8080`) and a stub upstream. The seed in `deploy/seed.yaml` creates the routes `/weather` and `/maps` and the tenants `acme`, `globex`, `initech` and `loadtest`. It's applied only to an empty database. Gateway 1's admin and management listeners are on `localhost:18081` and `localhost:18082`.
 
 To run a single gateway without Compose, see the `gateway.*` settings in `src/main/resources/application.yml`. They're all overridable by environment variable, e.g. `DATABASE_URL`, `VALKEY_URL`, `GATEWAY_AUDIT_HMAC_KEY` and `GATEWAY_CUSTOMER_PUBLIC_JWK_FILE`.
+
+## Visualizer
+
+A demo client with a live architecture view. It has one-click scenarios (a burst against the rate limit, shared quota across instances, token attacks, path tricks, header spoofing and more), a custom request composer, and an animated diagram showing where each request stopped. It also shows what the upstream received and the health of every service.
+
+```bash
+docker compose --env-file dev-keys/compose.env --profile viz build gateway-1 visualizer
+docker compose --env-file dev-keys/compose.env --profile viz up -d     # then open http://127.0.0.1:8090
+```
+
+On DigitalOcean it runs as a component of the app at `https://<app>.ondigitalocean.app/visualizer/` (password-protected) and sends its requests through the real App Platform load balancer. See [docs/visualizer.md](docs/visualizer.md) and [docs/deployment.md §9](docs/deployment.md#9-visualizer).
 
 ## Token issuance
 
@@ -82,6 +93,8 @@ Upstreams should:
 ./mvnw verify -DexcludedGroups=resilience   # skip the multi-instance suite
 ./scripts/smoke.sh                          # container smoke test against the Compose stack
 ./scripts/compose-smoke.sh                  # rolling restart of both gateways under load; requires zero errors
+./mvnw -f visualizer/pom.xml verify         # visualizer tests and its coverage gate
+./scripts/visualizer-smoke.sh               # visualizer against the running Compose stack (after smoke.sh)
 ```
 
 Integration tests use Testcontainers (PostgreSQL, Valkey, Toxiproxy) and WireMock. The test catalog is in [docs/testing.md](docs/testing.md).
@@ -89,10 +102,10 @@ Integration tests use Testcontainers (PostgreSQL, Valkey, Toxiproxy) and WireMoc
 ## CI
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push:
-- the full test suite with the coverage gate;
+- the full test suite with the coverage gate, for the gateway and the visualizer;
 - an OSV dependency scan;
-- a Docker build;
-- the container smoke test;
+- Docker builds of both images;
+- the container smoke test, including the visualizer end to end;
 - the rolling-restart test.
 
 Actions are pinned to commit SHAs.
@@ -116,5 +129,7 @@ The gateway forwards request and response bodies byte-for-byte and never logs th
 - A total database outage longer than about 8.5 minutes (with default settings) makes instances report not-ready.
 - The gateway operator configures which scopes are forwarded to each upstream. Upstreams can't yet declare the scopes they need themselves.
 - Audit logs go to stdout. There's no tamper-evident store yet.
+- The visualizer can mint customer tokens for its allowlisted tenants. When hosted, it holds a separate demo key (revocable on its own) and requires a password.
+- The DigitalOcean demo deployment turns on `X-Gateway-Instance`, which names the instance that served each response. It's off by default.
 
 The full threat model is in [security_posture.md](security_posture.md).

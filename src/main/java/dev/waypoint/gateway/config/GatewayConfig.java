@@ -24,6 +24,7 @@ import dev.waypoint.gateway.proxy.ClientIpResolver;
 import dev.waypoint.gateway.proxy.IdleTimeoutRelay;
 import dev.waypoint.gateway.proxy.JdkUpstreamClient;
 import dev.waypoint.gateway.proxy.ProxyHandler;
+import dev.waypoint.gateway.proxy.ResponseStamp;
 import dev.waypoint.gateway.proxy.UpstreamClient;
 import dev.waypoint.gateway.ratelimit.LocalRateLimiter;
 import dev.waypoint.gateway.ratelimit.RateLimiter;
@@ -222,18 +223,25 @@ public class GatewayConfig {
     }
 
     @Bean
+    ResponseStamp responseStamp(GatewayInstance instance, GatewayProperties properties) {
+        return new ResponseStamp(instance.id(), properties.proxy().exposeInstanceHeader());
+    }
+
+    @Bean
     ProxyHandler proxyHandler(UpstreamClient client, UpstreamSelector selector, UpstreamAddressPolicy policy,
                               IdentityTokenMinter minter, ProblemWriter problems, IdleTimeoutRelay bodyRelay,
-                              GatewayProperties properties) {
-        return new ProxyHandler(client, selector, policy, minter, problems, bodyRelay, properties.proxy().maxRequestBytes());
+                              GatewayProperties properties, ResponseStamp stamp) {
+        return new ProxyHandler(client, selector, policy, minter, problems, bodyRelay, properties.proxy().maxRequestBytes(),
+                stamp);
     }
 
     @Bean
     GatewayPipeline gatewayPipeline(CustomerAuthenticator authenticator, RateLimiter rateLimiter, ProxyHandler proxy,
                                     SnapshotHolder snapshots, GatewayState state, ClientIpResolver clientIps,
-                                    ProblemWriter problems, AuditRecorder audit, GatewayProperties properties) {
+                                    ProblemWriter problems, AuditRecorder audit, GatewayProperties properties,
+                                    ResponseStamp stamp) {
         return new GatewayPipeline(Stages.ordered(properties.proxy().maxRequestBytes(), authenticator, rateLimiter),
-                proxy, snapshots, state, clientIps, problems, audit);
+                proxy, snapshots, state, clientIps, problems, audit, stamp);
     }
 
     @Bean

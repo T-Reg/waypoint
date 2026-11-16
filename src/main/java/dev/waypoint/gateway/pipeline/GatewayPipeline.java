@@ -5,6 +5,7 @@ import dev.waypoint.gateway.error.ProblemWriter;
 import dev.waypoint.gateway.error.Rejection;
 import dev.waypoint.gateway.proxy.ClientIpResolver;
 import dev.waypoint.gateway.proxy.ProxyHandler;
+import dev.waypoint.gateway.proxy.ResponseStamp;
 import dev.waypoint.gateway.proxy.ResponseAbortedException;
 import dev.waypoint.gateway.store.GatewayState;
 import dev.waypoint.gateway.store.SnapshotHolder;
@@ -31,9 +32,11 @@ public class GatewayPipeline {
     private final ClientIpResolver clientIpResolver;
     private final ProblemWriter problems;
     private final AuditRecorder audit;
+    private final ResponseStamp stamp;
 
     public GatewayPipeline(List<Stage> stages, ProxyHandler proxy, SnapshotHolder snapshots, GatewayState state,
-                           ClientIpResolver clientIpResolver, ProblemWriter problems, AuditRecorder audit) {
+                           ClientIpResolver clientIpResolver, ProblemWriter problems, AuditRecorder audit,
+                           ResponseStamp stamp) {
         this.stages = List.copyOf(stages);
         this.proxy = proxy;
         this.snapshots = snapshots;
@@ -41,12 +44,13 @@ public class GatewayPipeline {
         this.clientIpResolver = clientIpResolver;
         this.problems = problems;
         this.audit = audit;
+        this.stamp = stamp;
     }
 
     public void handle(HttpServletRequest request, HttpServletResponse response) {
         RequestContext ctx = new RequestContext(UUID.randomUUID().toString(), request, snapshots.get(),
                 clientIpResolver.resolve(request.getRemoteAddr(), request.getHeaders("X-Forwarded-For")), System.nanoTime());
-        response.setHeader("X-Request-Id", ctx.requestId());
+        stamp.apply(response, ctx.requestId());
         try {
             Optional<Rejection> rejection = state.isBootstrapped() && snapshots.isLoaded()
                     ? runStages(ctx)

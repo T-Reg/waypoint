@@ -24,6 +24,7 @@ Internet ──HTTPS──► App Platform edge (TLS, load balancer, health chec
 | Valkey ACL user limited to `rl:*` | Managed Valkey has no ACL users ([limits](https://docs.digitalocean.com/products/databases/valkey/details/limits/)). The gateway uses `default` on a cluster dedicated to it |
 | Seed file | None. Routes and tenants are created through the admin API (step 6) |
 | Admin port on localhost | Internal port only; reached from the App Platform console |
+| Visualizer (`viz` profile, HAProxy `X-Served-By`) | `visualizer` component at `/visualizer/`; gateways send `X-Gateway-Instance` (step 9) |
 
 Approximate cost: two `apps-s-1vcpu-1gb` gateways (about $24/mo), one small upstream (about $5/mo), and 1 GB PostgreSQL and Valkey clusters (about $15/mo each). Check current pricing, and tear everything down when you're finished (step 8).
 
@@ -45,10 +46,12 @@ Keep them outside the repo, separate from `dev-keys/`:
 mkdir -m 700 ~/waypoint-prod-keys && cd ~/waypoint-prod-keys
 <repo>/scripts/token-cli keygen --out-dir ~/waypoint-prod-keys --name issuer
 <repo>/scripts/token-cli keygen --out-dir ~/waypoint-prod-keys --name admin
+<repo>/scripts/token-cli keygen --out-dir ~/waypoint-prod-keys --name demo-issuer   # the visualizer's own key (step 9)
 (umask 077; openssl rand -base64 32 > ~/waypoint-prod-keys/audit-hmac.key)
+(umask 077; openssl rand -base64 24 > ~/waypoint-prod-keys/visualizer.pw)
 ```
 
-Only the two public JWKs and the HMAC key are uploaded. The private keys stay on the operator's machine.
+Only the public JWKs, the HMAC key and the visualizer's secrets are uploaded. The issuer and admin private keys stay on the operator's machine. The visualizer gets only the demo issuer key, which the gateway trusts alongside the real one.
 
 ## 2. Managed PostgreSQL and Valkey
 
@@ -99,14 +102,18 @@ Fill a git-ignored copy of the spec:
 cp .do/app.yaml .do/app.local.yaml
 K=~/waypoint-prod-keys
 export MIGRATOR_PW="$(cat $K/pg-migrator.pw)" HMAC="$(cat $K/audit-hmac.key)" \
-       ISSUER_JWK="$(jq -c . $K/issuer.public.jwk.json)" ADMIN_JWK="$(jq -c . $K/admin.public.jwk.json)"
+       ISSUER_JWKS="$(jq -cs '{keys: .}' $K/issuer.public.jwk.json $K/demo-issuer.public.jwk.json)" \
+       ADMIN_JWK="$(jq -c . $K/admin.public.jwk.json)" \
+       DEMO_KEY="$(jq -c . $K/demo-issuer.private.jwk.json)" VIZ_PW="$(cat $K/visualizer.pw)"
 yq -i '
   (.services[0].envs[] | select(.key == "GATEWAY_STORE_MIGRATION_PASSWORD")).value = strenv(MIGRATOR_PW) |
   (.services[0].envs[] | select(.key == "GATEWAY_AUDIT_HMAC_KEY")).value = strenv(HMAC) |
-  (.services[0].envs[] | select(.key == "GATEWAY_CUSTOMER_PUBLIC_JWK")).value = strenv(ISSUER_JWK) |
-  (.services[0].envs[] | select(.key == "GATEWAY_ADMIN_PUBLIC_JWK")).value = strenv(ADMIN_JWK)
+  (.services[0].envs[] | select(.key == "GATEWAY_CUSTOMER_PUBLIC_JWK")).value = strenv(ISSUER_JWKS) |
+  (.services[0].envs[] | select(.key == "GATEWAY_ADMIN_PUBLIC_JWK")).value = strenv(ADMIN_JWK) |
+  (.services[] | select(.name == "visualizer") | .envs[] | select(.key == "VISUALIZER_ISSUER_KEY")).value = strenv(DEMO_KEY) |
+  (.services[] | select(.name == "visualizer") | .envs[] | select(.key == "VISUALIZER_ACCESS_PASSWORD")).value = strenv(VIZ_PW)
 ' .do/app.local.yaml
-unset MIGRATOR_PW HMAC
+unset MIGRATOR_PW HMAC DEMO_KEY VIZ_PW
 grep -c REPLACE_ME .do/app.local.yaml        # expect 0
 
 doctl apps spec validate .do/app.local.yaml
@@ -193,8 +200,30 @@ doctl databases delete $PG_ID
 doctl databases delete $VK_ID
 ```
 
+## 9. Visualizer
+
+The spec runs the [visualizer](visualizer.md) as a third component. It's served at `$APP_URL/visualizer/`, behind HTTP Basic (user `demo`, password in `~/waypoint-prod-keys/visualizer.pw`). It sends its requests through the public App Platform load balancer (`${APP_URL}`), and reads gateway status, the JWKS and the upstream's request journal over the app's private network.
+
+What makes it work on App Platform:
+- **Its own token key:** `GATEWAY_CUSTOMER_PUBLIC_JWK` is a JWK set holding the issuer key and the demo key. To revoke the visualizer, remove the demo key from the set and redeploy.
+- **Instance attribution:** `GATEWAY_EXPOSE_INSTANCE_HEADER=true` makes each gateway name itself in `X-Gateway-Instance`. The App Platform load balancer adds no such header, and instances can't be addressed individually.
+- **Upstream journal:** `deploy/upstream/Dockerfile` keeps the last 2000 requests so the visualizer can show what the upstream received.
+- **Scenario data:** the scenarios use the tenants and routes from `deploy/seed.yaml`. In the console from step 6, add the `/maps` route and `loadtest` tenant, and give `acme` access to `/maps`. Updating an existing tenant needs its current ETag:
+
+```bash
+admin routes/maps '{"pathPrefix":"/maps","upstreams":[{"url":"http://upstream:8080"}],
+  "requiredScopes":{"*":["maps:read"]},"allowPrivateNetwork":true}'
+admin tenants/loadtest '{"allowedPathPrefixes":["/weather"],"requestsPerMinute":100000}'
+ETAG=$(curl -s -D - -o /dev/null -H "Authorization: Bearer $ADMIN" localhost:8081/admin/tenants/acme | awk 'tolower($1)=="etag:" {print $2}' | tr -d '\r')
+curl -s -X PUT -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -H "If-Match: $ETAG" \
+  localhost:8081/admin/tenants/acme -d '{"allowedPathPrefixes":["/weather","/echo","/maps"],"requestsPerMinute":600}'
+```
+
+Open `$APP_URL/visualizer/` and run **Allowed request**: the lane for the instance that answered lights up, and the drawer shows the identity token verified against the gateway's JWKS.
+
 ## Known gaps on this platform
 
 - **Valkey `default` user:** leaked credentials give full access to the cluster. Mitigations: a cluster dedicated to the gateway, TLS and trusted sources.
 - **Client IP:** App Platform sends the client IP in `do-connecting-ip` and the ingress IP in `X-Forwarded-For` ([DO support](https://docs.digitalocean.com/support/where-can-i-find-the-client-ip-address-of-a-request-connecting-to-my-app)). The gateway reads only `X-Forwarded-For`, so the audit `client_ip` is the ingress address.
-- **Internal ports:** any component of the app can reach the admin and management ports. The admin API still requires an admin JWT.
+- **Internal ports:** any component of the app can reach the admin and management ports, and the upstream's WireMock admin API (including the visualizer). The admin API still requires an admin JWT.
+- **Visualizer:** anyone with its password can mint demo tokens for the allowlisted tenants. Remove the demo key from the gateway's key set to revoke it.

@@ -7,11 +7,13 @@ import dev.waypoint.gateway.audit.AuditRecorder;
 import dev.waypoint.gateway.audit.PathHasher;
 import dev.waypoint.gateway.auth.TenantIdentity;
 import dev.waypoint.gateway.error.ProblemWriter;
+import dev.waypoint.gateway.error.Rejection;
 import dev.waypoint.gateway.identity.GatewayKeyStore;
 import dev.waypoint.gateway.identity.IdentityTokenMinter;
 import dev.waypoint.gateway.proxy.ClientIpResolver;
 import dev.waypoint.gateway.proxy.IdleTimeoutRelay;
 import dev.waypoint.gateway.proxy.ProxyHandler;
+import dev.waypoint.gateway.proxy.ResponseStamp;
 import dev.waypoint.gateway.proxy.UpstreamClient;
 import dev.waypoint.gateway.routing.Route;
 import dev.waypoint.gateway.routing.RouteTable;
@@ -59,6 +61,7 @@ class GatewayPipelineTest {
     private final List<AuditEntry> audit = new ArrayList<>();
     private final List<HttpRequest> sent = new ArrayList<>();
     private final IdleTimeoutRelay relay = new IdleTimeoutRelay();
+    private ResponseStamp stamp = ResponseStamp.requestIdOnly();
 
     @AfterEach
     void closeRelay() {
@@ -132,6 +135,40 @@ class GatewayPipelineTest {
         assertThat(forwardedHeaders(List.of(), null, null).firstValue("X-Forwarded-Host")).isEmpty();
     }
 
+    @Test
+    void instanceHeaderIsOffByDefault() {
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        pipeline(List.of(routed()), okClient(), List.of()).handle(request(), response);
+
+        assertThat(response.getHeader(ResponseStamp.REQUEST_ID_HEADER)).isNotBlank();
+        assertThat(response.getHeader(ResponseStamp.INSTANCE_HEADER)).isNull();
+    }
+
+    @Test
+    void exposedInstanceHeaderIsOnProxiedResponsesAndOverridesTheUpstreams() {
+        stamp = new ResponseStamp("gw-1234", true);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        pipeline(List.of(routed()), okClient(Map.of(ResponseStamp.INSTANCE_HEADER, List.of("spoofed"))), List.of())
+                .handle(request(), response);
+
+        assertThat(response.getStatus()).isEqualTo(200);
+        assertThat(response.getHeaders(ResponseStamp.INSTANCE_HEADER)).containsExactly("gw-1234");
+    }
+
+    @Test
+    void exposedInstanceHeaderIsOnRejectionsAndUpstreamFailures() {
+        stamp = new ResponseStamp("gw-1234", true);
+        MockHttpServletResponse rejected = new MockHttpServletResponse();
+        pipeline(List.of(ctx -> Optional.of(Rejection.of(403, "policy.path_denied", "no"))),
+                okClient(), List.of()).handle(request(), rejected);
+        MockHttpServletResponse failed = run(request -> { throw new HttpConnectTimeoutException("connect timed out"); });
+
+        assertThat(rejected.getStatus()).isEqualTo(403);
+        assertThat(rejected.getHeader(ResponseStamp.INSTANCE_HEADER)).isEqualTo("gw-1234");
+        assertThat(failed.getStatus()).isEqualTo(502);
+        assertThat(failed.getHeader(ResponseStamp.INSTANCE_HEADER)).isEqualTo("gw-1234");
+    }
+
     private HttpHeaders forwardedHeaders(List<String> trustedProxies, String forwardedProto, String host) {
         sent.clear();
         MockHttpServletRequest request = request();
@@ -164,13 +201,13 @@ class GatewayPipelineTest {
             return client.send(request);
         };
         ProxyHandler proxy = new ProxyHandler(recording, UpstreamSelector.primary(), new UpstreamAddressPolicy(Fixtures.noListeners()),
-                new IdentityTokenMinter(keys, "waypoint-gateway", Duration.ofSeconds(60), clock), problems, relay, 1024);
+                new IdentityTokenMinter(keys, "waypoint-gateway", Duration.ofSeconds(60), clock), problems, relay, 1024, stamp);
         SnapshotHolder snapshots = new SnapshotHolder();
         snapshots.swapIfNewer(new ConfigSnapshot(1, RouteTable.builder().add(route).build(), Map.of("acme", tenant), List.of()));
         GatewayState state = new GatewayState();
         state.markBootstrapped();
         AuditRecorder recorder = new AuditRecorder(audit::add, new PathHasher(new byte[32]), clock);
-        return new GatewayPipeline(stages, proxy, snapshots, state, new ClientIpResolver(trustedProxies), problems, recorder);
+        return new GatewayPipeline(stages, proxy, snapshots, state, new ClientIpResolver(trustedProxies), problems, recorder, stamp);
     }
 
     private Stage routed() {
@@ -193,11 +230,15 @@ class GatewayPipelineTest {
     }
 
     private static UpstreamClient okClient() {
+        return okClient(Map.of());
+    }
+
+    private static UpstreamClient okClient(Map<String, List<String>> headers) {
         return request -> new HttpResponse<>() {
             @Override public int statusCode() { return 200; }
             @Override public HttpRequest request() { return request; }
             @Override public Optional<HttpResponse<InputStream>> previousResponse() { return Optional.empty(); }
-            @Override public HttpHeaders headers() { return HttpHeaders.of(Map.of(), (name, value) -> true); }
+            @Override public HttpHeaders headers() { return HttpHeaders.of(headers, (name, value) -> true); }
             @Override public InputStream body() { return new ByteArrayInputStream(new byte[0]); }
             @Override public Optional<SSLSession> sslSession() { return Optional.empty(); }
             @Override public URI uri() { return request.uri(); }

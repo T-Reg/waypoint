@@ -39,10 +39,12 @@ public record GatewayProperties(
             @DefaultValue("10m") Duration keyStaleAfter,
             @DefaultValue("10s") Duration keyPublishGrace) {}
 
+    /** {@code exposeInstanceHeader} adds {@code X-Gateway-Instance} to public responses; off by default (it names the instance). */
     public record Proxy(
             @DefaultValue("10485760") long maxRequestBytes,
             @DefaultValue("5s") Duration connectTimeout,
-            @DefaultValue List<String> trustedProxies) {}
+            @DefaultValue List<String> trustedProxies,
+            @DefaultValue("false") boolean exposeInstanceHeader) {}
 
     public record Audit(String pathHmacKey) {}
 

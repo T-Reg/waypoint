@@ -1,0 +1,17 @@
+# DigitalOcean App Platform: the visualizer runs as a component of the same app (see docs/visualizer.md).
+# Component names resolve on the app's private network; "gateway" load-balances across its instances.
+visualizer:
+  targets:
+    lb: ${VISUALIZER_LB_URL}
+    internal: ${VISUALIZER_INTERNAL_URL:http://gateway:8080}
+  gateway-management:
+    gateway: ${VISUALIZER_GATEWAY_MANAGEMENT_URL:http://gateway:8082}
+  # Several probes per poll, each on a new connection, so every instance behind "gateway" gets seen.
+  management-probes: 4
+  load-balancer-name: App Platform LB
+  load-balancer-health-url: ${VISUALIZER_LB_URL}/visualizer/actuator/health
+  haproxy-stats-url: ""
+  upstream-admin-url: ${VISUALIZER_UPSTREAM_ADMIN_URL:http://upstream:8080/__admin}
+  jwks-url: ${VISUALIZER_JWKS_URL:http://gateway:8082/.well-known/jwks.json}
+  access:
+    required: true

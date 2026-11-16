@@ -8,6 +8,9 @@ source "$(dirname "$0")/lib.sh"
 TOKEN="$(customer_token loadtest "weather:read")"
 RESULTS="$(mktemp)"
 STOP="$(mktemp -u)"
+# Stop the load workers however this script ends; otherwise they keep looping against port 8080.
+trap 'touch "$STOP"' EXIT
+trap 'exit 130' INT TERM
 
 load() {
   while [[ ! -e "$STOP" ]]; do
