@@ -38,3 +38,5 @@ dev-keys/
 
 ### Test caches ###
 .jqwik-database
+
+temp/
