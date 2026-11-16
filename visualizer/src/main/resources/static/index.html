@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Waypoint Visualizer</title>
+  <!-- Served under a path prefix on App Platform (/visualizer): relative URLs need the trailing slash. -->
+  <script>
+    if (!location.pathname.endsWith('/') && !location.pathname.endsWith('.html')) {
+      location.replace(location.pathname + '/' + location.search + location.hash);
+    }
+  </script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%233e63dd'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div>
+        <h1>Waypoint</h1>
+        <p>Live gateway visualizer</p>
+      </div>
+    </div>
+    <div class="conn" id="conn" title="Live event stream">
+      <span class="dot"></span><span id="conn-text">connecting…</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section>
+        <h2>Scenarios</h2>
+        <p class="hint">One click sends real requests through the gateway.</p>
+        <div id="scenarios" class="scenarios"></div>
+      </section>
+
+      <details class="composer" id="composer">
+        <summary><h2>Custom request</h2></summary>
+        <form id="composer-form" autocomplete="off">
+          <div class="row">
+            <label>Method
+              <select name="method">
+                <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
+                <option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
+              </select>
+            </label>
+            <label class="grow">Path <input name="path" value="/weather/today" spellcheck="false"></label>
+          </div>
+          <div class="row">
+            <label class="grow">Tenant <select name="tenant"></select></label>
+            <label class="grow">Send to <select name="target"></select></label>
+          </div>
+          <label>Scopes <input name="scope" value="weather:read maps:read" spellcheck="false"></label>
+          <label>Token <select name="fault"></select></label>
+          <label>Extra headers <textarea name="headers" rows="2" placeholder="X-Forwarded-For: 6.6.6.6" spellcheck="false"></textarea></label>
+          <label>Body <textarea name="body" rows="2" placeholder='{"temp": 21}' spellcheck="false"></textarea></label>
+          <div class="row">
+            <label class="grow">Count <input name="count" type="number" min="1" value="1"></label>
+            <label class="grow">Concurrency <input name="concurrency" type="number" min="1" value="1"></label>
+          </div>
+          <button type="submit" class="primary">Send</button>
+          <p class="form-error" id="composer-error" role="alert"></p>
+        </form>
+      </details>
+    </aside>
+
+    <main class="main">
+      <section class="panel diagram-panel">
+        <div class="panel-head">
+          <h2>Architecture</h2>
+          <div class="legend">
+            <span><i class="swatch ok"></i>reached upstream</span>
+            <span><i class="swatch deny"></i>rejected</span>
+            <span><i class="swatch err"></i>error</span>
+          </div>
+        </div>
+        <svg id="diagram" viewBox="0 0 1200 420" role="img" aria-label="Request flow through HAProxy, two gateway instances and the upstream"></svg>
+      </section>
+
+      <div class="main-scroll">
+      <section class="panel run-panel" aria-live="polite">
+        <div class="panel-head">
+          <h2 id="run-title">No run yet</h2>
+          <span class="run-meta" id="run-meta">Pick a scenario on the left</span>
+        </div>
+        <p class="watch" id="run-watch"></p>
+        <div class="progress"><div class="bar" id="run-bar"></div></div>
+        <div class="run-stats">
+          <div><span class="label">Expected</span><span id="run-expect" class="value">–</span></div>
+          <div><span class="label">Actual</span><span id="run-actual" class="value chips">–</span></div>
+          <div><span class="label">Served by</span><span id="run-served" class="value chips">–</span></div>
+        </div>
+        <div class="strip" id="run-strip" title="Each square is one request, in the order it completed"></div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="panel-head">
+          <h2>Requests</h2>
+          <button type="button" class="ghost" id="clear-log">Clear</button>
+        </div>
+        <div class="table-wrap">
+          <table class="log">
+            <thead>
+              <tr><th>Time</th><th>Tenant</th><th>Request</th><th>Via</th><th>Status</th><th>Stopped at</th><th class="num">ms</th></tr>
+            </thead>
+            <tbody id="log-body"></tbody>
+          </table>
+        </div>
+      </section>
+      </div>
+    </main>
+  </div>
+
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2 id="drawer-title">Request</h2>
+      <button type="button" class="ghost" id="drawer-close" aria-label="Close">✕</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

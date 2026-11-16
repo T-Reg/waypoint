@@ -1,4 +1,5 @@
 target/
+visualizer/target/
 dev-keys/
 .git/
 .github/

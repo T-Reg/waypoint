@@ -1,0 +1,15 @@
+# Local docker-compose stack (the default profile): HAProxy in front of gateway-1 and gateway-2.
+visualizer:
+  targets:
+    lb: ${VISUALIZER_LB_URL:http://haproxy:8080}
+    gateway-1: ${VISUALIZER_GATEWAY_1_URL:http://gateway-1:8080}
+    gateway-2: ${VISUALIZER_GATEWAY_2_URL:http://gateway-2:8080}
+  gateway-management:
+    gateway-1: ${VISUALIZER_GATEWAY_1_MANAGEMENT_URL:http://gateway-1:8082}
+    gateway-2: ${VISUALIZER_GATEWAY_2_MANAGEMENT_URL:http://gateway-2:8082}
+  management-probes: 1
+  load-balancer-name: HAProxy
+  load-balancer-health-url: ""
+  haproxy-stats-url: ${VISUALIZER_HAPROXY_STATS_URL:http://haproxy:8404/stats;csv}
+  upstream-admin-url: ${VISUALIZER_UPSTREAM_ADMIN_URL:http://upstream:8080/__admin}
+  jwks-url: ${VISUALIZER_JWKS_URL:http://gateway-1:8082/.well-known/jwks.json}

@@ -19,6 +19,7 @@ The prompt is described in CodeBash.md in this same directory.
 - `docs/testing.md`: test case catalog (identity/JWKS, resilience R1–R20, compose smoke). Keep test cases there, not in design.md.
 - `docs/deployment.md`: DigitalOcean App Platform deployment (managed Postgres/Valkey, app spec, smoke test).
 - `docs/research.md`: reading list and takeaways.
+- `docs/visualizer.md`: demo client and live visualizer (`visualizer/`), its scenarios, security model and config.
 - `security_posture.md`: threat model (required deliverable).
 - `README.md`: public-facing summary.
 

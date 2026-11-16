@@ -25,4 +25,8 @@ AUDIT_HMAC_KEY=$(openssl rand -base64 32)
 EOV
   echo "wrote $ENV_FILE"
 fi
+if ! grep -q '^VISUALIZER_ISSUER_KEY=' "$ENV_FILE"; then
+  # The visualizer (compose profile "viz") mints demo customer tokens with the issuer key.
+  printf 'VISUALIZER_ISSUER_KEY=%s\n' "$(tr -d '\n' < "$DIR/issuer.private.jwk.json")" >> "$ENV_FILE"
+fi
 echo "dev keys ready in $DIR"

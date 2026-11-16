@@ -11,6 +11,12 @@ alerts:
 # Connection values are filled in directly; add the app to each cluster's trusted sources by hand.
 ingress:
   rules:
+    # Most specific prefix first. The prefix is stripped, so the visualizer serves itself at "/".
+    - match:
+        path:
+          prefix: /visualizer
+      component:
+        name: visualizer
     - match:
         path:
           prefix: /
@@ -77,15 +83,20 @@ services:
         scope: RUN_TIME
         type: SECRET
         value: REPLACE_ME_audit_hmac_key
+      # A JWK set: the issuer's key plus the visualizer's demo key ({"keys":[...]}); drop the demo key to revoke it.
       - key: GATEWAY_CUSTOMER_PUBLIC_JWK
         scope: RUN_TIME
-        value: REPLACE_ME_issuer_public_jwk_json
+        value: REPLACE_ME_issuer_and_demo_public_jwk_set_json
       - key: GATEWAY_ADMIN_PUBLIC_JWK
         scope: RUN_TIME
         value: REPLACE_ME_admin_public_jwk_json
       - key: GATEWAY_SHUTDOWN_DELAY
         scope: RUN_TIME
         value: 5s
+      # Demo only: names the serving instance in X-Gateway-Instance so the visualizer can draw it.
+      - key: GATEWAY_EXPOSE_INSTANCE_HEADER
+        scope: RUN_TIME
+        value: "true"
     # Runtime logs (including audit lines) are copied to Managed OpenSearch; the cluster must exist first.
     log_destinations:
       - name: audit-opensearch
@@ -106,3 +117,33 @@ services:
     health_check:
       port: 8080
       http_path: /__admin/health
+
+  # Demo client and live visualizer at ${APP_URL}/visualizer/ (docs/visualizer.md). Holds only the demo issuer key.
+  - name: visualizer
+    github:
+      repo: T-Reg/waypoint
+      branch: main
+      deploy_on_push: false
+    dockerfile_path: visualizer/Dockerfile
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    http_port: 8090
+    health_check:
+      port: 8090
+      http_path: /actuator/health
+      initial_delay_seconds: 10
+    envs:
+      - key: SPRING_PROFILES_ACTIVE
+        scope: RUN_TIME
+        value: app-platform
+      - key: VISUALIZER_LB_URL
+        scope: RUN_TIME
+        value: ${APP_URL}
+      - key: VISUALIZER_ISSUER_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_ME_demo_issuer_private_jwk_json
+      - key: VISUALIZER_ACCESS_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_ME_visualizer_password

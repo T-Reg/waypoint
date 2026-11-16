@@ -194,6 +194,7 @@ PostgreSQL is the source of truth for routes and tenants. Each instance serves f
 - Stream the request and response bodies, with a configurable maximum request size (`gateway.proxy.max-request-bytes`, default 10 MiB). The JDK client is fixed to HTTP/1.1 and never follows redirects.
 - Requests Tomcat itself rejects before any filter runs (e.g. raw illegal characters in the request line) get Tomcat's 400 and aren't audited. Encoded `/` is passed through to the normalizer so it gets an audited 400.
 - Return the upstream status, headers and body faithfully.
+- Every public response carries `X-Request-Id`. With `gateway.proxy.expose-instance-header` (off by default) it also carries `X-Gateway-Instance` with the serving instance's ID, so a demo client can tell instances apart behind a load balancer that doesn't say. Both are set last, so an upstream can't override them.
 - Bodies are forwarded byte-for-byte. The gateway never parses them and doesn't restrict content types.
 
 ## 7a. Identity propagation to upstreams
@@ -255,6 +256,7 @@ TLS hides paths from the network, but the gateway sees everything. It therefore 
 | JWT algorithm? | `alg: Ed25519` only (RFC 9864); `EdDSA` rejected | Nimbus 10.10 supports the fully-specified identifier, so no fallback is needed |
 | Updating without `If-Match`? | 428 Precondition Required ([RFC 6585](https://www.rfc-editor.org/rfc/rfc6585#section-3)) | Forces optimistic locking on every update, so lost updates can't happen by omission |
 | Spring Boot line? | 4.1 with Jackson 3 (§2) | Boot 3.5 left open-source support in June 2026 and needed patched-dependency overrides plus CVE ignores |
+| Which instance served a request, behind App Platform? | Opt-in `X-Gateway-Instance` response header (§7), enabled only for the demo deployment | The platform load balancer adds no such header and instances aren't individually addressable; a random instance ID leaks little, and it stays off by default |
 
 ## 12. Open questions
 None currently.

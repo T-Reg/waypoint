@@ -23,6 +23,9 @@ tenants:
   globex:
     allowedPathPrefixes: [/weather]
     requestsPerMinute: 60
+  initech:
+    allowedPathPrefixes: [/weather]
+    requestsPerMinute: 30
   loadtest:
     allowedPathPrefixes: [/weather]
     requestsPerMinute: 100000

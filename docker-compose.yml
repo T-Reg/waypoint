@@ -88,16 +88,34 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     depends_on: [gateway-1, gateway-2]
-    networks: [edge]
+    networks: [edge, client]
 
   upstream:
     image: wiremock/wiremock:3.13.2
+    # Bounded journal: the visualizer queries it to show what the upstream received.
+    command: ["--max-request-journal-entries", "2000"]
     volumes:
       - ./deploy/upstream/mappings:/home/wiremock/mappings:ro
     networks: [backend]
 
+  # Demo client and live visualizer: docker-compose --profile viz up -d, then open http://127.0.0.1:8090
+  visualizer:
+    profiles: [viz]
+    build:
+      context: .
+      dockerfile: visualizer/Dockerfile
+    image: waypoint-visualizer:local
+    depends_on: [haproxy, upstream]
+    environment:
+      VISUALIZER_ISSUER_KEY: ${VISUALIZER_ISSUER_KEY:-}
+    ports:
+      - "127.0.0.1:8090:8090"
+    # Not on "edge": the gateways trust X-Forwarded-For from that subnet, and the visualizer is a client.
+    networks: [client, backend]
+
 networks:
   backend: {}
+  client: {}
   edge:
     ipam:
       config:

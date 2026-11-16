@@ -12,7 +12,7 @@ Run everything with `./mvnw verify`. Surefire picks up `*Test` (unit), `*Propert
 | Token validation (every rejection branch) | `auth/Ed25519JwtVerifierTest`, `auth/CustomerAuthenticatorTest`, `auth/AdminAuthenticatorTest`, `auth/JwkLoaderTest` (incl. separate admin/customer trust) |
 | Policy stages (allowlist, 404/405/403/429, ordering) | `pipeline/StagesTest`, `it/GatewayProxyIT` |
 | Routes, tenants, SSRF validation | `routing/*Test`, `tenant/TenantValidatorTest`, `it/AdminApiIT` |
-| Proxy headers, client IP, streaming, 502/504/413 | `proxy/*Test`, `it/GatewayProxyIT` |
+| Proxy headers, client IP, streaming, 502/504/413, opt-in `X-Gateway-Instance` | `proxy/*Test`, `pipeline/GatewayPipelineTest`, `it/GatewayProxyIT` |
 | Pipeline and proxy error branches: unexpected exception → 500 `internal`, no upstream call, still audited (even if the 500 can't be written); connect timeout and interrupted upstream call → 502; `X-Forwarded-Proto` taken from a trusted proxy only when `http`/`https`; `X-Forwarded-Host` only for a well-formed `Host`; a query the upstream URI can't carry (`?a=%zz`) → 400 `request.bad_path` | `pipeline/GatewayPipelineTest` (stub `UpstreamClient`), `it/GatewayProxyIT` |
 | Admin listener path hygiene: `;` path parameters and percent-encoded characters → 404 `admin.not_found` | `it/AdminApiIT` |
 | Upstream body idle timeout and mid-body failures: steady body longer than `timeoutMs` streams fully; stall or drop before commit → 504/502 without upstream headers; stall or drop after commit → connection aborted with no terminating chunk and the audit `error_code` set | `proxy/IdleTimeoutRelayTest`, `it/GatewayProxyIT` (raw-socket `support/StallingUpstream`) |
@@ -85,3 +85,27 @@ Conventions: JUnit tag `resilience`; Testcontainers PostgreSQL + Valkey (+ Toxip
 `scripts/smoke.sh` (CI job `container-smoke`) starts the stack, issues tokens with `token-cli`, and checks: an allowed request reaches the stub upstream (which returns 400 unless it gets a well-formed `X-Gateway-Identity` and no `Authorization`), plus 401/403/400 denials, listener separation, and that the JWKS holds only public keys.
 
 `scripts/compose-smoke.sh` (CI job `compose-smoke`): docker compose runs Postgres, Valkey, 2 gateways and HAProxy as the LB. HAProxy is used instead of open-source nginx because it has active health checks, and nginx's are [NGINX Plus only](https://docs.nginx.com/nginx/admin-guide/load-balancer/http-health-check/). The job runs a load loop with `docker compose restart gateway-1`, then `gateway-2`, and asserts no errors.
+
+## Visualizer (`visualizer/`)
+
+`./mvnw -f visualizer/pom.xml verify` runs the visualizer's own suite with its own JaCoCo gate (line ≥ 85%, branch ≥ 80%). CI job: `visualizer`.
+
+| Area | Tests (under `visualizer/src/test/java/dev/waypoint/visualizer/`) |
+|---|---|
+| Token minting and every fault (expired, `nbf`, tampered, wrong `aud`, `alg=none`, HS256), tenant allowlist, TTL cap, key loading | `token/TokenMinterTest` |
+| Problem `code` → stage mapping, including load-balancer and Tomcat-level failures | `traffic/StageMapperTest` |
+| Request validation (method, path, reserved headers, CR/LF, body size) | `traffic/RequestSpecTest` |
+| Full caller against a WireMock "gateway" and a real WireMock journal: stage, `X-Served-By`, upstream headers, identity verification and its failure modes, signature redaction, unreachable targets | `traffic/GatewayCallerIT` |
+| JWKS refetch on key rotation, at most once per 5 s | `traffic/IdentityVerifierIT` |
+| Health: gateway status, HAProxy CSV, derived PostgreSQL/Valkey state | `health/HaproxyStatsTest`, `health/HealthPollerIT` |
+| Scenario catalog validity, run limits, concurrency cap, sequential/parallel steps, pacing | `scenario/ScenarioCatalogTest`, `scenario/ScenarioRunnerTest` |
+| HTTP API, SSE stream, static page, error mapping | `api/ApiIT`, `events/EventHubTest` |
+| Basic-auth gate, refusing to start without a password when required | `config/AccessFilterTest` |
+| `app-platform` profile: binds, requires the password, offers only the load balancer and internal targets, leaves out per-instance scenarios | `api/AppPlatformProfileIT`, `scenario/ScenarioCatalogTest` |
+| Instance discovery behind one load-balanced status URL, TTL expiry, load balancer health URL | `health/HealthPollerIT` |
+
+`scripts/visualizer-smoke.sh` (in the `container-smoke` CI job) runs the real visualizer container against the Compose stack. It checks that:
+- an allowed request reaches the upstream with a JWKS-verified identity and no `Authorization` header;
+- HAProxy names the serving instance;
+- missing-token and path-denied requests stop at the right stage and never reach the upstream;
+- both gateways report healthy.

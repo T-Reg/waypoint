@@ -39,6 +39,27 @@ jobs:
           name: surefire-reports
           path: target/surefire-reports/
 
+  visualizer:
+    name: Visualizer tests and coverage gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Unit and integration tests with JaCoCo gate
+        run: ./mvnw -B -f visualizer/pom.xml verify
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visualizer-jacoco-report
+          path: visualizer/target/site/jacoco/
+          if-no-files-found: ignore
+
   dependency-scan:
     name: Dependency vulnerability scan
     runs-on: ubuntu-24.04
@@ -51,6 +72,7 @@ jobs:
           scan-args: |-
             --config=osv-scanner.toml
             ./pom.xml
+            ./visualizer/pom.xml
 
   docker-build:
     name: Docker build
@@ -62,6 +84,8 @@ jobs:
         run: docker build --tag waypoint:ci .
       - name: Build demo upstream image (App Platform)
         run: docker build --tag waypoint-upstream:ci deploy/upstream
+      - name: Build visualizer image
+        run: docker build --file visualizer/Dockerfile --tag waypoint-visualizer:ci .
 
   container-smoke:
     name: Container smoke test
@@ -78,12 +102,14 @@ jobs:
         run: ./mvnw -B -q package -DskipTests
       - name: Start stack, issue tokens, check allow and deny paths
         run: ./scripts/smoke.sh
+      - name: Visualizer end to end (send requests, verify stage, upstream journal and identity)
+        run: ./scripts/visualizer-smoke.sh
       - name: Logs on failure
         if: failure()
-        run: docker compose --env-file dev-keys/compose.env logs --tail 200
+        run: docker compose --env-file dev-keys/compose.env --profile viz logs --tail 200
       - name: Tear down
         if: always()
-        run: docker compose --env-file dev-keys/compose.env down -v || true
+        run: docker compose --env-file dev-keys/compose.env --profile viz down -v || true
 
   compose-smoke:
     name: Rolling restart under load (compose-smoke)

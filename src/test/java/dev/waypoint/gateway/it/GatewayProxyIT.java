@@ -140,6 +140,7 @@ class GatewayProxyIT {
         assertThat(response.headers().firstValue("X-Upstream")).contains("yes");
         assertThat(response.headers().firstValue("Set-Cookie")).contains("a=1");
         String requestId = response.headers().firstValue("X-Request-Id").orElseThrow();
+        assertThat(response.headers().firstValue("X-Gateway-Instance")).as("off unless gateway.proxy.expose-instance-header").isEmpty();
 
         LoggedRequest got = received().get(0);
         assertThat(got.getUrl()).isEqualTo("/weather/today/san%20jos%C3%A9?units=metric&x=%2F");

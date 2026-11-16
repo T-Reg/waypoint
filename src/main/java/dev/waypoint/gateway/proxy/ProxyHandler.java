@@ -43,9 +43,11 @@ public class ProxyHandler {
     private final ProblemWriter problems;
     private final IdleTimeoutRelay bodyRelay;
     private final long maxRequestBytes;
+    private final ResponseStamp stamp;
 
     public ProxyHandler(UpstreamClient client, UpstreamSelector selector, UpstreamAddressPolicy addressPolicy,
-                        IdentityTokenMinter minter, ProblemWriter problems, IdleTimeoutRelay bodyRelay, long maxRequestBytes) {
+                        IdentityTokenMinter minter, ProblemWriter problems, IdleTimeoutRelay bodyRelay, long maxRequestBytes,
+                        ResponseStamp stamp) {
         this.client = client;
         this.selector = selector;
         this.addressPolicy = addressPolicy;
@@ -53,6 +55,7 @@ public class ProxyHandler {
         this.problems = problems;
         this.bodyRelay = bodyRelay;
         this.maxRequestBytes = maxRequestBytes;
+        this.stamp = stamp;
     }
 
     public void forward(RequestContext ctx, HttpServletResponse response) throws IOException {
@@ -158,7 +161,7 @@ public class ProxyHandler {
         for (Map.Entry<String, String> header : HeaderPolicy.responseHeaders(upstream.headers())) {
             response.addHeader(header.getKey(), header.getValue());
         }
-        response.setHeader("X-Request-Id", ctx.requestId());
+        stamp.apply(response, ctx.requestId());
         try (InputStream body = upstream.body()) {
             bodyRelay.copy(body, response.getOutputStream(), Duration.ofMillis(route.timeoutMs()));
             response.flushBuffer();
@@ -181,7 +184,7 @@ public class ProxyHandler {
             throw new ResponseAbortedException(afterCommitCode);
         }
         response.reset();
-        response.setHeader("X-Request-Id", ctx.requestId());
+        stamp.apply(response, ctx.requestId());
         fail(ctx, response, beforeCommit);
     }
 

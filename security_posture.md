@@ -8,6 +8,7 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 
 **Assets:**
 - The customer-token signing private key (held by the issuer CLI, never by the gateway).
+- The visualizer's demo issuer key: a second customer-token key the gateway trusts, held by the hosted visualizer (DigitalOcean) or the dev issuer key locally.
 - The gateway's identity-token signing private key (held by the gateway; used to sign `X-Gateway-Identity`).
 - Tenant identity and scopes.
 - Tenant quotas, which affect fairness and availability.
@@ -25,6 +26,7 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 5. Gateway (identity-token key) → upstreams (verify with the gateway's JWKS).
 6. Gateway instances → PostgreSQL (TLS, least-privilege DB user).
 7. Gateway instances → Valkey (TLS, ACL user limited to rate-limit keys where the host supports ACLs; DigitalOcean Managed Valkey doesn't, see §5).
+8. Visualizer (demo client holding a demo issuer key) → the load balancer and the gateways' public listeners, as a client. It reads gateway management status, the load balancer's read-only stats (HAProxy only) and the stub upstream's request journal. See [docs/visualizer.md](docs/visualizer.md).
 
 ## 2. What can go wrong? (STRIDE)
 
@@ -82,6 +84,12 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 | Config store | DB outage stops traffic | DoS | Request path uses the in-memory snapshot only; DB outage only blocks admin writes (tested, R6) | Implemented |
 | Config store | App DB user rewrites the change history | Repudiation | `config_audit` triggers block UPDATE/DELETE/TRUNCATE for every role; the app role gets INSERT/SELECT only (tested) | Implemented |
 | Supply chain | Known-vulnerable dependency | Elevation | OSV-Scanner in CI fails the build on any known-vulnerable dependency; Boot 4.1 (supported line) with no version overrides and no ignored advisories | Implemented |
+| Visualizer | Anyone who can reach the visualizer mints customer tokens | Spoofing / Elevation | On DigitalOcean it holds only a demo key the gateway trusts alongside the issuer key (a JWK set); removing it from the set revokes the visualizer, and the real issuer key never leaves the operator. Mints only for `visualizer.allowed-tenants`, TTL ≤ 5 min; HTTP Basic gate, which the `app-platform` profile requires (startup fails without a password); bound to 127.0.0.1 in Compose | Implemented |
+| Visualizer | Visualizer used as a traffic amplifier against the gateway | DoS | ≤ 200 requests per run, ≤ 20 in flight, ≤ 3 concurrent runs; the gateway's own quotas still apply | Implemented |
+| Visualizer | Page leaks a replayable identity token | Info disclosure | Signature removed server-side before results reach the browser; only claims are shown | Implemented |
+| Visualizer | Visualizer's requests trusted as coming from a proxy, so its `X-Forwarded-For` would be believed | Spoofing | Not attached to the `edge` network (the `trustedProxies` subnet); it reaches HAProxy over a separate `client` network | Implemented |
+| Load balancer | `X-Served-By` and HAProxy stats reveal instance names | Info disclosure | Instance names only, no addresses in the header; stats on `:8404` are read-only and not published to the host. In production, drop the header at the edge if instance names are sensitive | Accepted |
+| Proxy | `X-Gateway-Instance` tells clients which instance served them (helps target one instance or map the fleet) | Info disclosure | Off by default (`gateway.proxy.expose-instance-header`); the value is a random ID, never an address; set last, so an upstream can't forge it. Enabled only on the DigitalOcean demo deployment | Accepted (demo) |
 
 ## 3. Malicious authenticated tenant
 
@@ -131,6 +139,8 @@ See [docs/privacy.md](docs/privacy.md).
 - Downstream service-to-service calls (second hop) have no token exchange or mTLS yet, so a downstream service must not reuse the identity token for other services.
 - Gateway identity private keys live in process memory, not a KMS/HSM.
 - Object-level authorization is the upstream's responsibility; the gateway only enforces path- and scope-level policy.
+- The hosted visualizer holds a demo customer-token key. Anyone with its password can mint short-lived tokens for its allowlisted tenants. Revoke it by removing the demo key from `GATEWAY_CUSTOMER_PUBLIC_JWK`.
+- The DigitalOcean demo deployment enables `X-Gateway-Instance`, so clients can tell instances apart.
 - `forwardScopes` are configured by the gateway operator. Possible future improvement: upstreams declare the scopes they need per request.
 
 ## 6. Did we do a good job?
@@ -153,6 +163,8 @@ See [docs/privacy.md](docs/privacy.md).
 | Audit minimization, HMAC stability, no tokens/queries/bodies | `audit/AuditTest`, `it/GatewayProxyIT.audit*`, `it/GatewayProxyIT.stripsPrefixAndRoundTripsOpaqueBinaryBody` |
 | Append-only audit trail, least-privilege DB role | `store/PostgresConfigStoreIT` |
 | DB outage, partition, bad rows, rolling restart | `resilience/*` (R1–R24) |
+| Visualizer tenant allowlist, TTL cap, access gate, run limits, signature redaction | `visualizer/.../token/TokenMinterTest`, `config/AccessFilterTest`, `api/AppPlatformProfileIT`, `scenario/ScenarioRunnerTest`, `traffic/GatewayCallerIT`, `scripts/visualizer-smoke.sh` |
+| `X-Gateway-Instance` off by default, on every response when enabled, not forgeable by the upstream | `pipeline/GatewayPipelineTest.instanceHeader*`, `pipeline/GatewayPipelineTest.exposedInstanceHeader*`, `it/GatewayProxyIT` |
 
 **Findings during implementation** (fixed, each with a test):
 - The "own listener" SSRF rule matched any private address on a gateway port, which blocked a different container on port 8080. It now applies only to this host's addresses (found by the compose smoke test).
