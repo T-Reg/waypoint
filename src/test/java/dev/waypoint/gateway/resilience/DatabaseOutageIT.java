@@ -2,6 +2,7 @@ package dev.waypoint.gateway.resilience;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import dev.waypoint.gateway.support.Containers;
 import dev.waypoint.gateway.support.Db;
@@ -15,7 +16,10 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.toxiproxy.ToxiproxyContainer;
 
-/** R6, R7, R20, R22: the request path never depends on the DB; startup waits for it and its app role; a partitioned instance drains itself. */
+/**
+ * R6, R7, R20, R22, R24: the request path never depends on the DB; startup waits for it and its app role
+ * and stops cleanly on shutdown; a partitioned instance drains itself.
+ */
 class DatabaseOutageIT extends ResilienceSupport {
 
     @Test
@@ -79,6 +83,22 @@ class DatabaseOutageIT extends ResilienceSupport {
         a.awaitReady();
         assertThat(store.query("SELECT has_table_privilege(?, 'routes', 'SELECT') AS granted", role).get(0).get("granted"))
                 .as("V2 granted the role access").isEqualTo(true);
+    }
+
+    @Test
+    void r24_shutdownDuringStartupRetriesStopsTheBootstrap() {
+        String role = "app_r24_" + ProcessHandle.current().pid();
+        Db store = new Db(db);
+        TestGateway a = startNotReady(node("a")
+                .property("gateway.store.app-role", role)
+                .property("gateway.store.startup-retry-max", "200ms"));
+        await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5)).until(() -> !a.isReady());
+
+        assertTimeoutPreemptively(Duration.ofSeconds(10), a::close, "shutdown isn't held up by the retry loop");
+
+        Containers.createRole(role, "r24");
+        await("a stopped instance never migrates").during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5))
+                .until(() -> (Boolean) store.query("SELECT to_regclass('routes') IS NULL AS absent").get(0).get("absent"));
     }
 
     @Test

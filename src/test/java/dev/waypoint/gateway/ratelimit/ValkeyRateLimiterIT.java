@@ -9,6 +9,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -89,7 +90,8 @@ class ValkeyRateLimiterIT {
         LettuceConnectionFactory nowhere = new LettuceConnectionFactory(Containers.VALKEY.getHost(), 1);
         nowhere.afterPropertiesSet();
         try {
-            assertThatThrownBy(new ValkeyRateLimiter(new StringRedisTemplate(nowhere))::warmUp).isInstanceOf(RuntimeException.class);
+            assertThatThrownBy(new ValkeyRateLimiter(new StringRedisTemplate(nowhere))::warmUp)
+                    .isInstanceOf(RedisConnectionFailureException.class);
         } finally {
             nowhere.destroy();
         }

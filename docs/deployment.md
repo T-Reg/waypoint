@@ -225,6 +225,18 @@ Zero-downtime deploy: keep a request loop running against `$APP_URL/weather/x` w
 - **Deploys:** `deploy_on_push` is off. Run `doctl apps create-deployment $APP_ID` after CI is green on `main`.
 - **Optional:** a custom domain (**Settings → Domains**), and VPC egress so the app reaches the databases on private hostnames.
 
+### Changing the running app
+
+Edit the deployed spec rather than `.do/app.yaml`, so the secrets stay encrypted (`EV[...]`) and don't need filling in again:
+
+```bash
+(umask 077; doctl apps spec get $APP_ID > ~/waypoint-prod-keys/live-spec.yaml)
+yq -i '<your change>' ~/waypoint-prod-keys/live-spec.yaml
+doctl apps update $APP_ID --spec ~/waypoint-prod-keys/live-spec.yaml   # triggers a rolling deploy
+```
+
+Skip `doctl apps spec validate` here. It checks the spec as a new app and rejects encrypted secrets (`secret env value must not be encrypted before app is created`). `doctl apps update` validates the spec itself and accepts them.
+
 Teardown:
 
 ```bash

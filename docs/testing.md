@@ -21,7 +21,7 @@ Run everything with `./mvnw verify`. Surefire picks up `*Test` (unit), `*Propert
 | Identity token & JWKS | `identity/*Test`, `identity/IdentityTokenProperties`, `it/IdentityIT`, `it/GatewayProxyIT` |
 | Config store, migrations, least privilege (incl. migration refused when the app role is missing) | `store/PostgresConfigStoreIT`, `store/SnapshotSwapProperties` |
 | Token CLI | `cli/TokenCliTest` |
-| Multi-instance R1–R23 | `resilience/ConfigPropagationIT` (R1–R5, R13, R14), `resilience/DatabaseOutageIT` (R6, R7, R20, R22), `resilience/LifecycleIT` (R8–R12, R15, R21), `resilience/SharedQuotaIT` (R16–R19, R23) |
+| Multi-instance R1–R24 | `resilience/ConfigPropagationIT` (R1–R5, R13, R14), `resilience/DatabaseOutageIT` (R6, R7, R20, R22, R24), `resilience/LifecycleIT` (R8–R12, R15, R21), `resilience/SharedQuotaIT` (R16–R19, R23) |
 
 ## Identity token & JWKS
 
@@ -47,7 +47,7 @@ Design: [identity.md §2](identity.md#2-identity-propagation-to-upstreams).
 | Integration | Spoofing: a client-sent `X-Gateway-Identity` is stripped and replaced, and `Connection: X-Gateway-Identity, X-Request-Id` doesn't remove the gateway's headers. The upstream receives only the gateway-minted token. |
 | Integration | Rejected requests (401/403/429) mint no identity token, and the upstream receives zero requests. |
 
-## Multi-instance resilience (R1–R23)
+## Multi-instance resilience (R1–R24)
 
 Design: [multi-instance.md](multi-instance.md).
 
@@ -78,6 +78,7 @@ Conventions: JUnit tag `resilience`; Testcontainers PostgreSQL + Valkey (+ Toxip
 | R21 | **Key NOTIFY:** A, B and C with poll and heartbeat set to 1h and `key-publish-grace` set to 1h, so only NOTIFY can deliver keys | C's key appears in A's and B's JWKS within 5s of C becoming ready, and a token minted by C verifies via A's JWKS. After a rotation on A, every instance's JWKS lists all six keys (three current, three staged) within 5s, while every instance still signs with its old key |
 | R22 | **App role missing at startup:** start A on an empty DB with `gateway.store.app-role` naming a role that doesn't exist, then create the role | A stays not-ready, serves 503 and migrates nothing; once the role exists, A becomes ready and the role has the V2 grants |
 | R23 | **Limiter connected before ready:** start A with a Valkey client name | Valkey's `CLIENT LIST` shows A's connection as soon as A is ready, before any request, and `/internal/status` reports `rateLimiter: normal`. Unit tests cover the warm-up retry and starting degraded when Valkey is unreachable |
+| R24 | **Shutdown during startup retries:** start A with a missing app role (as R22) and a 200 ms retry cap, then close A | Close finishes within 10s. After the role is created, A migrates nothing, so a stopped instance's retry loop never touches the DB |
 
 ## Container smoke test (`compose-smoke` CI job)
 
