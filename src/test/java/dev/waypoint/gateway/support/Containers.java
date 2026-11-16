@@ -26,12 +26,17 @@ public final class Containers {
             .withNetwork(NETWORK)
             .withNetworkAliases("valkey");
 
+    /** The gateway's DML role, which migrations require to exist (cluster-wide, so created once). */
+    public static final String APP_ROLE = "waypoint_app";
+    public static final String APP_ROLE_PASSWORD = "app";
+
     private static final AtomicInteger DATABASES = new AtomicInteger();
     private static volatile ToxiproxyContainer toxiproxy;
 
     static {
         POSTGRES.start();
         VALKEY.start();
+        createRole(APP_ROLE, APP_ROLE_PASSWORD);
     }
 
     private Containers() {}
@@ -46,6 +51,15 @@ public final class Containers {
             throw new IllegalStateException(e);
         }
         return POSTGRES.getJdbcUrl().replaceFirst("/[^/?]+(\\?|$)", "/" + name + "$1");
+    }
+
+    public static void createRole(String name, String password) {
+        try (Connection c = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+             Statement s = c.createStatement()) {
+            s.execute("CREATE ROLE " + name + " LOGIN PASSWORD '" + password + "'");
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     public static String valkeyUrl() {

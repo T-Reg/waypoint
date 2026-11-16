@@ -240,7 +240,7 @@ TLS hides paths from the network, but the gateway sees everything. It therefore 
 |---|---|
 | Circuit breaker | `UpstreamClient` decorator per upstream URL: closed → open after N failures in a window → half-open probe after cooldown. Config on the route. |
 | Canary routing | `UpstreamSelector` over `route.upstreams[]`: weighted random, or sticky per tenant via `hash(tid)`. |
-| Deployment | Dockerfile, plus a guide for DigitalOcean App Platform or a Droplet. Infrastructure is provisioned manually. |
+| Deployment | Dockerfile, an App Platform spec (`.do/app.yaml`) and a [DigitalOcean guide](deployment.md). Infrastructure is provisioned manually. |
 
 ## 11. Decisions log
 

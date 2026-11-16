@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import dev.waypoint.gateway.support.Containers;
+import dev.waypoint.gateway.support.Db;
 import dev.waypoint.gateway.support.TestGateway;
 import dev.waypoint.gateway.support.UpstreamVerifier;
 import eu.rekawek.toxiproxy.Proxy;
@@ -14,7 +15,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.toxiproxy.ToxiproxyContainer;
 
-/** R6, R7, R20: the request path never depends on the DB; startup waits for it; a partitioned instance drains itself. */
+/** R6, R7, R20, R22: the request path never depends on the DB; startup waits for it and its app role; a partitioned instance drains itself. */
 class DatabaseOutageIT extends ResilienceSupport {
 
     @Test
@@ -63,6 +64,21 @@ class DatabaseOutageIT extends ResilienceSupport {
         c.awaitReady();
         assertThat(c.revision()).isEqualTo(revision);
         assertThat(c.get("/svc/x", token()).statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void r22_missingAppRoleKeepsInstanceNotReadyUntilTheRoleExists() {
+        String role = "app_r22_" + ProcessHandle.current().pid();
+        Db store = new Db(db);
+        TestGateway a = startNotReady(node("a").property("gateway.store.app-role", role));
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).until(() -> !a.isReady());
+        assertThat(a.get("/svc/x", token()).statusCode()).as("serves no traffic").isEqualTo(503);
+        assertThat(store.query("SELECT to_regclass('routes') IS NULL AS absent").get(0).get("absent")).as("nothing migrated").isEqualTo(true);
+
+        Containers.createRole(role, "r22");
+        a.awaitReady();
+        assertThat(store.query("SELECT has_table_privilege(?, 'routes', 'SELECT') AS granted", role).get(0).get("granted"))
+                .as("V2 granted the role access").isEqualTo(true);
     }
 
     @Test

@@ -36,7 +36,8 @@ public record GatewayProperties(
             @DefaultValue("waypoint-gateway") String issuer,
             @DefaultValue("60s") Duration tokenTtl,
             @DefaultValue("10s") Duration heartbeatInterval,
-            @DefaultValue("10m") Duration keyStaleAfter) {}
+            @DefaultValue("10m") Duration keyStaleAfter,
+            @DefaultValue("10s") Duration keyPublishGrace) {}
 
     public record Proxy(
             @DefaultValue("10485760") long maxRequestBytes,

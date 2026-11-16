@@ -118,18 +118,25 @@ class PostgresConfigStoreIT {
 
     @Test
     void appRoleHasDmlButCannotRewriteAuditOrChangeSchema() throws Exception {
-        db.query("SELECT 1");
-        new Db(Containers.POSTGRES.getJdbcUrl()).update(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waypoint_app') THEN CREATE ROLE waypoint_app LOGIN PASSWORD 'app'; END IF; END $$");
         String fresh = Containers.newDatabase();
-        new Migrator(fresh, Containers.POSTGRES.getUsername(), Containers.POSTGRES.getPassword(), "waypoint_app").migrate();
-        try (Connection app = java.sql.DriverManager.getConnection(fresh, "waypoint_app", "app"); Statement s = app.createStatement()) {
+        new Migrator(fresh, Containers.POSTGRES.getUsername(), Containers.POSTGRES.getPassword(), Containers.APP_ROLE).migrate();
+        try (Connection app = java.sql.DriverManager.getConnection(fresh, Containers.APP_ROLE, Containers.APP_ROLE_PASSWORD);
+             Statement s = app.createStatement()) {
             s.executeUpdate("INSERT INTO tenants (id, spec, version, updated_at, updated_by) VALUES ('t', '{}', 1, now(), 'x')");
             s.executeUpdate("INSERT INTO config_audit (at, actor, action, entity_type, entity_id, revision) VALUES (now(), 'a', 'b', 'c', 'd', 1)");
             assertThatThrownBy(() -> s.executeUpdate("UPDATE config_audit SET actor = 'mallory'")).hasMessageContaining("permission denied");
             assertThatThrownBy(() -> s.executeUpdate("DELETE FROM config_audit")).hasMessageContaining("permission denied");
             assertThatThrownBy(() -> s.execute("DROP TABLE routes")).hasMessageContaining("must be owner");
         }
+    }
+
+    @Test
+    void migrationRefusesToRunWithoutTheAppRole() {
+        String fresh = Containers.newDatabase();
+        Migrator migrator = new Migrator(fresh, Containers.POSTGRES.getUsername(), Containers.POSTGRES.getPassword(), "missing_app_role");
+        assertThatThrownBy(migrator::migrate).isInstanceOf(IllegalStateException.class).hasMessageContaining("'missing_app_role' does not exist");
+        assertThat(new Db(fresh).query("SELECT to_regclass('flyway_schema_history') IS NULL AS absent").get(0).get("absent"))
+                .as("nothing is migrated, so the grants still run once the role exists").isEqualTo(true);
     }
 
     @Test

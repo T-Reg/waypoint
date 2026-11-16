@@ -62,6 +62,7 @@ public final class TestGateway implements AutoCloseable {
             properties.put("gateway.identity.token-ttl", "60s");
             properties.put("gateway.identity.heartbeat-interval", "300ms");
             properties.put("gateway.identity.key-stale-after", "10m");
+            properties.put("gateway.identity.key-publish-grace", "500ms");
             properties.put("gateway.store.poll-interval", "500ms");
             properties.put("gateway.store.startup-retry-max", "500ms");
             properties.put("gateway.lifecycle.shutdown-delay", "0s");

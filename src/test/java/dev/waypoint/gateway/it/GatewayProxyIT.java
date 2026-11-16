@@ -469,6 +469,15 @@ class GatewayProxyIT {
     }
 
     @Test
+    void queryTheUpstreamUriCannotCarryIs400() throws IOException {
+        RawHttp.Response response = RawHttp.get(gw.publicPort(), "/weather/x?a=%zz", "Authorization: Bearer " + acme("weather:read"));
+        assertThat(response.status()).isEqualTo(400);
+        assertThat(response.body()).contains("\"code\":\"request.bad_path\"");
+        assertThat(errorCode(requestId(response))).isEqualTo("request.bad_path");
+        assertNoUpstreamCall();
+    }
+
+    @Test
     void oversizedBodyIs413() {
         HttpResponse<String> response = gw.call("POST", "/files/x", acme(""), "x".repeat(1_000_001), Map.of());
         assertThat(response.statusCode()).isEqualTo(413);

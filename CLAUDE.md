@@ -17,6 +17,7 @@ The prompt is described in CodeBash.md in this same directory.
 - `docs/privacy.md`: confidentiality and traffic privacy.
 - `docs/architecture.md`: Mermaid request-flow diagram (required deliverable). Keep it in sync with the pipeline.
 - `docs/testing.md`: test case catalog (identity/JWKS, resilience R1–R20, compose smoke). Keep test cases there, not in design.md.
+- `docs/deployment.md`: DigitalOcean App Platform deployment (managed Postgres/Valkey, app spec, smoke test).
 - `docs/research.md`: reading list and takeaways.
 - `security_posture.md`: threat model (required deliverable).
 - `README.md`: public-facing summary.

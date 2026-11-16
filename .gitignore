@@ -40,3 +40,5 @@ dev-keys/
 .jqwik-database
 
 temp/
+# App Platform spec with real secret values (see docs/deployment.md)
+.do/app.local.yaml

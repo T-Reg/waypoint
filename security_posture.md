@@ -26,7 +26,7 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 4. Token issuer (CLI with the private key) → gateway (public key only).
 5. Gateway (identity-token key) → upstreams (verify with the gateway's JWKS).
 6. Gateway instances → PostgreSQL (TLS, least-privilege DB user).
-7. Gateway instances → Valkey (TLS, ACL user limited to rate-limit keys).
+7. Gateway instances → Valkey (TLS, ACL user limited to rate-limit keys where the host supports ACLs; DigitalOcean Managed Valkey doesn't, see §5).
 
 ## 2. What can go wrong? (STRIDE)
 
@@ -50,6 +50,7 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 | Config store | Tampered DB row points a route at an attacker host | Tampering / Elevation | Least-privilege DB user, TLS (`verify-full`), upstream URLs re-validated on load, invalid entries skipped (fail closed per route) | Implemented |
 | Config store | One bad row stops instances from starting | DoS | Per-entry validation at load and startup (tested, R13) | Implemented |
 | Config store | DB credentials leaked | Elevation | Credentials from env/secret only; DDL only for the migration user; app user `INSERT`/`SELECT` only on `config_audit`; DigitalOcean trusted sources restrict network access | Implemented |
+| Config store | App role created after the first migration never gets its grants, so a fresh deploy fails in confusing ways | DoS | Migration refuses to run until the app role exists; the instance stays not-ready and logs why (tested, R22) | Implemented |
 | Config store | SQL injection via admin input | Tampering | Parameterized SQL only | Implemented |
 | Config store | Two admins overwrite each other's changes | Tampering | Optimistic locking (`If-Match` / `version`), 409 on conflict (tested, R5) | Implemented |
 | Config store | Admin denies making a change | Repudiation | Append-only `config_audit` with actor, time, and before/after values | Implemented |
@@ -70,7 +71,7 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 | Rate limiter | One tenant exhausts shared capacity | DoS | Per-tenant token bucket; body-size limit; upstream timeouts on both response headers and body idle time (a stalled body is closed after `timeoutMs` of silence) | Implemented |
 | Rate limiter | Scaling out multiplies a tenant's quota | Elevation / DoS | Shared Valkey sliding window enforces one quota across all instances (tested, R16–R17) | Implemented |
 | Rate limiter | Valkey outage or slowness becomes a gateway outage | DoS | 50ms command timeout; degrade to local bucket at RPM ÷ live instances; circuit breaker re-probes (tested, R18–R19) | Implemented |
-| Rate limiter | Valkey credentials leaked, or another client resets buckets | Tampering | TLS, ACL user limited to `rl:*` and script commands, credentials from env/secret | Implemented |
+| Rate limiter | Valkey credentials leaked, or another client resets buckets | Tampering | TLS, credentials from env/secret, trusted sources. ACL user limited to `rl:*` and script commands where supported (Compose); DigitalOcean Managed Valkey allows only the `default` user, so it uses a cluster dedicated to the gateway | Partial |
 | Rate limiter | Unbounded bucket map growth | DoS | Buckets keyed only by authenticated, known tenants | Implemented |
 | Audit | Log injection / tokens in logs | Tampering / Info disclosure | Structured JSON encoder; tokens, bodies and query strings never logged | Implemented |
 | Audit | Logs reveal end-user behavior (e.g. location in the path) | Info disclosure | Path minimized **by default** (matched prefix + keyed HMAC); raw path only on per-tenant opt-in | Implemented |
@@ -119,6 +120,8 @@ See [docs/privacy.md](docs/privacy.md).
 - Rate limiting is shared via Valkey. Accepted risks:
   - During a Valkey outage, quotas are approximate (RPM ÷ live instances).
   - If Valkey loses data, buckets refill to full once.
+  - On DigitalOcean Managed Valkey the gateway connects as the `default` user (ACL users aren't supported), so leaked credentials give full access to that cluster. Mitigation: a cluster used only by the gateway, TLS and trusted sources.
+- On DigitalOcean App Platform, the edge puts the client IP in `do-connecting-ip` and the ingress IP in `X-Forwarded-For`. The gateway reads only `X-Forwarded-For`, so the audit `client_ip` there is the ingress address. A configurable client-IP header would fix this.
 - Config changes are eventually consistent across instances, bounded by the poll interval (default 10s) in the worst case.
 - TLS is terminated in front of the gateway; there is no mTLS to upstreams.
 - No per-tenant concurrency limit; slow requests can tie up connections up to the timeout.

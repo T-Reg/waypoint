@@ -114,14 +114,14 @@ public class GatewayConfig {
 
     @Bean
     KeyRegistry keyRegistry(JdbcClient jdbc) {
-        return new KeyRegistry(jdbc);
+        return new KeyRegistry(jdbc, PostgresConfigStore.CHANNEL);
     }
 
     @Bean
     KeyService keyService(GatewayKeyStore keyStore, KeyRegistry registry, Clock clock, GatewayInstance instance, GatewayProperties properties) {
         GatewayProperties.Identity identity = properties.identity();
         return new KeyService(keyStore, registry, clock, instance.id(), identity.tokenTtl(), properties.auth().clockSkew(),
-                identity.heartbeatInterval(), identity.keyStaleAfter());
+                identity.heartbeatInterval(), identity.keyStaleAfter(), identity.keyPublishGrace());
     }
 
     @Bean

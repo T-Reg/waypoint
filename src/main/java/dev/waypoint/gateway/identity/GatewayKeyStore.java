@@ -16,19 +16,24 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
- * This instance's Ed25519 identity-token keys, held only in memory. A retired key stays published
- * for the token TTL plus clock skew so tokens it signed keep verifying. Peer instances' public keys
- * are merged in from the registry as a last-known-good set.
+ * This instance's Ed25519 identity-token keys, held only in memory. A staged key is published at
+ * once but signs only from its activation time. A retired key stays published for the token TTL
+ * plus clock skew so tokens it signed keep verifying. Peer instances' public keys are merged in
+ * from the registry as a last-known-good set.
  */
 public class GatewayKeyStore {
 
     private record RetiredKey(OctetKeyPair key, Instant retiredAt) {}
 
+    private record StagedKey(OctetKeyPair key, Instant activateAt) {}
+
     private final Clock clock;
     private final Duration retention;
     private volatile OctetKeyPair current;
+    private volatile StagedKey staged;
     private final List<RetiredKey> retired = new ArrayList<>();
     private volatile Map<String, JWK> peerKeys = Map.of();
 
@@ -50,6 +55,7 @@ public class GatewayKeyStore {
     }
 
     public OctetKeyPair currentSigningKey() {
+        promoteIfDue();
         OctetKeyPair key = current;
         if (key == null) {
             throw new IllegalStateException("no signing key yet");
@@ -58,6 +64,7 @@ public class GatewayKeyStore {
     }
 
     public boolean hasSigningKey() {
+        promoteIfDue();
         return current != null;
     }
 
@@ -69,6 +76,18 @@ public class GatewayKeyStore {
         current = next;
     }
 
+    /**
+     * Publishes {@code next} now and starts signing with it at {@code activateAt}. Returns any
+     * earlier staged key that never signed and is now dropped.
+     */
+    public synchronized Optional<OctetKeyPair> stage(OctetKeyPair next, Instant activateAt) {
+        promoteIfDue();
+        StagedKey superseded = staged;
+        staged = new StagedKey(next, activateAt);
+        promoteIfDue();
+        return Optional.ofNullable(superseded).map(StagedKey::key);
+    }
+
     public synchronized void retireAll() {
         if (current != null) {
             retired.add(new RetiredKey(current, clock.instant()));
@@ -77,10 +96,14 @@ public class GatewayKeyStore {
     }
 
     public synchronized List<OctetKeyPair> ownPublishedKeys() {
+        promoteIfDue();
         pruneRetired();
         List<OctetKeyPair> keys = new ArrayList<>();
         if (current != null) {
             keys.add(current);
+        }
+        if (staged != null) {
+            keys.add(staged.key());
         }
         retired.forEach(r -> keys.add(r.key()));
         return keys;
@@ -100,6 +123,23 @@ public class GatewayKeyStore {
         }
         peerKeys.forEach(keys::putIfAbsent);
         return new JWKSet(new ArrayList<>(keys.values()));
+    }
+
+    private void promoteIfDue() {
+        StagedKey pending = staged;
+        if (pending == null || clock.instant().isBefore(pending.activateAt())) {
+            return;
+        }
+        synchronized (this) {
+            if (staged != pending) {
+                return;
+            }
+            if (current != null) {
+                retired.add(new RetiredKey(current, pending.activateAt()));
+            }
+            current = pending.key();
+            staged = null;
+        }
     }
 
     private void pruneRetired() {

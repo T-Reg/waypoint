@@ -15,16 +15,26 @@ public class KeyRegistry {
 
     public record LiveKeys(List<JWK> keys, int liveInstances) {}
 
-    private final JdbcClient jdbc;
+    public static final String NOTIFY_PREFIX = "key:";
 
-    public KeyRegistry(JdbcClient jdbc) {
+    private final JdbcClient jdbc;
+    private final String channel;
+
+    public KeyRegistry(JdbcClient jdbc, String channel) {
         this.jdbc = jdbc;
+        this.channel = channel;
     }
 
+    /** Inserts the public key and notifies peers in one statement, so the NOTIFY only fires once the row is committed. */
     public void register(OctetKeyPair key, String instanceId, Instant now) {
-        jdbc.sql("INSERT INTO gateway_keys (kid, public_jwk, instance_id, created_at, last_heartbeat) VALUES (:kid, :jwk, :instance, :now, :now)")
+        jdbc.sql("""
+                WITH inserted AS (
+                    INSERT INTO gateway_keys (kid, public_jwk, instance_id, created_at, last_heartbeat)
+                    VALUES (:kid, :jwk, :instance, :now, :now) RETURNING kid)
+                SELECT pg_notify(:channel, :prefix || kid) FROM inserted""")
                 .param("kid", key.getKeyID()).param("jwk", key.toPublicJWK().toJSONString())
-                .param("instance", instanceId).param("now", ts(now)).update();
+                .param("instance", instanceId).param("now", ts(now))
+                .param("channel", channel).param("prefix", NOTIFY_PREFIX).query().listOfRows();
     }
 
     public void heartbeat(String instanceId, Instant now) {
@@ -32,9 +42,10 @@ public class KeyRegistry {
                 .param("now", ts(now)).param("instance", instanceId).update();
     }
 
-    public void retire(String kid, Instant now) {
-        jdbc.sql("UPDATE gateway_keys SET retired_at = :now WHERE kid = :kid AND retired_at IS NULL")
-                .param("now", ts(now)).param("kid", kid).update();
+    /** Sets the key's retirement time; it can move later (a re-rotation during the grace) but never earlier. */
+    public void retire(String kid, Instant at) {
+        jdbc.sql("UPDATE gateway_keys SET retired_at = :at WHERE kid = :kid AND (retired_at IS NULL OR retired_at < :at)")
+                .param("at", ts(at)).param("kid", kid).update();
     }
 
     public void retireInstance(String instanceId, Instant now) {

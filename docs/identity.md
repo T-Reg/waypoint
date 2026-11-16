@@ -108,7 +108,7 @@ Keeping the key pairs separate means a compromised gateway can mint identity tok
 - **Contents:** only public parameters (`kty=OKP`, `crv=Ed25519`, `x`, `kid`, `alg=Ed25519`, `use=sig`). The private component `d` must never appear. The `kid` is the key's RFC 7638 thumbprint.
 - **Key lifecycle:**
   - Each instance generates its own Ed25519 key pair **in memory at startup**. The private key is never written to disk or to the DB, so there's no key file or row to leak.
-  - The instance registers its **public** key in `gateway_keys` ([multi-instance.md](multi-instance.md)) and heartbeats it.
+  - The instance registers its **public** key in `gateway_keys` ([multi-instance.md](multi-instance.md)) and heartbeats it. The insert and a `NOTIFY key:<kid>` run in one statement, so peers refresh their key set within milliseconds of the commit rather than on their next poll.
   - **Every instance's JWKS serves all live public keys from `gateway_keys`**, so a token minted by any instance verifies via the JWKS fetched from any instance behind the LB.
   - The JWKS is served from an in-memory, last-known-good key set that always includes the instance's own keys, and it's refreshed from the DB when available. A DB outage therefore doesn't break verification.
   - Other instances' keys aren't expired while the reading instance itself can't reach the DB.
@@ -116,11 +116,14 @@ Keeping the key pairs separate means a compromised gateway can mint identity tok
     - A crashed instance's public key lingering is harmless, because its private key died with the process. A long staleness window therefore costs nothing, and it buys tolerance of DB outages.
     - Trade-off: an instance can't tell "I am partitioned" from "the DB is down for everyone". A **total** DB outage longer than ~8.5 min (defaults) therefore makes every instance not-ready. Raise `key-stale-after` to widen that window.
   - A restart produces a new `kid`. Upstreams handle that by refetching when they see an unknown `kid`.
+  - **Remaining gap at startup:** a new instance signs as soon as it's ready, with no grace period. Its key reaches peers' JWKS via NOTIFY within milliseconds, well inside an LB's health-check rise time (HAProxy `rise 2`, `inter 1s`). If that NOTIFY is lost, peers learn the key on their next poll (≤ `poll-interval`).
 - **Rotation:** `POST /admin/keys/rotate` (admin JWT with `admin:keys` required) bumps `key_rotation.generation` and sends `NOTIFY`. Every instance rotates once per generation, whichever path (the request itself, NOTIFY or the poll) sees it first.
-  1. Generate a new key and publish its public half alongside the current one.
-  2. Start signing with the new key.
-  3. Remove the old key once the identity-token TTL plus clock skew has passed.
-  - The retirement uses the injected `Clock`, so tests are deterministic.
+  1. Generate a new key, register its public half (which notifies peers) and publish it alongside the current one.
+  2. Keep signing with the current key for `gateway.identity.key-publish-grace` (default 10s, equal to the poll interval), so peers have the new key even if a NOTIFY was missed. Then start signing with the new key.
+  3. Remove the old key once the identity-token TTL plus clock skew has passed **since it stopped signing**.
+  - A second rotation within the grace drops the staged key, which never signed, and stages a fresh one. The current key keeps signing until the new grace ends.
+  - The response returns the new `kid` and its `activatesAt`.
+  - Activation and retirement use the injected `Clock`, so tests are deterministic.
 - **Interface:** `GatewayKeyStore`, with `currentSigningKey()`, `publicJwks()` and `rotate()`.
 - **Guidance for upstream verifiers** (also in the README):
   - Fetch the JWKS from a **fixed, configured URL over TLS**.

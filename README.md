@@ -60,7 +60,7 @@ curl -X PUT -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json
 # Update: repeat with  -H 'If-Match: "1"'  (the ETag from the previous response)
 ```
 
-`POST /admin/keys/rotate` rotates the identity-token signing keys on every instance.
+`POST /admin/keys/rotate` rotates the identity-token signing keys on every instance. Each new key is published right away and starts signing after a short grace period (`gateway.identity.key-publish-grace`, default 10s), so upstreams can fetch it before they see it.
 
 ## What upstreams receive
 
@@ -70,6 +70,10 @@ Upstreams should:
 - Verify it against the gateway's public keys at `/.well-known/jwks.json` on the management listener.
 - Fetch keys only from that fixed URL over TLS, never from a URL or key named inside the token.
 - Cache the keys, and refetch when they see an unknown `kid`, since keys rotate.
+
+## Deploying to DigitalOcean
+
+`.do/app.yaml` runs two gateways and a demo upstream on App Platform, with managed PostgreSQL and Valkey. App Platform terminates TLS, and only the public listener is exposed. Step-by-step setup is in [docs/deployment.md](docs/deployment.md).
 
 ## Running tests
 
@@ -105,6 +109,8 @@ The gateway forwards request and response bodies byte-for-byte and never logs th
 - Individual tokens can't be revoked before they expire, so token lifetimes are kept short. Disabling a tenant revokes all of its tokens.
 - Tokens are issued by hand with a CLI and a file-based key. This stands in for a real token service: no self-service issuance, no revocation, and no key held in a hardware or cloud key store.
 - Rate limits are shared across instances through Valkey. If Valkey is unavailable, each instance enforces an approximate share of the quota instead of failing.
+- DigitalOcean Managed Valkey has no ACL users, so the deployed gateway uses the `default` user on a cluster dedicated to it.
+- On App Platform, the audit log records the platform's ingress IP rather than the client IP, which arrives in a header the gateway doesn't read yet (`do-connecting-ip`).
 - SSRF protection re-checks an upstream's resolved addresses before every call, but there's no hook at the exact moment of connection, so a narrow DNS-rebinding window remains.
 - Upstream responses have a per-route idle timeout but no total deadline, so streaming routes (SSE, long-poll) need a timeout longer than their heartbeat interval.
 - A total database outage longer than about 8.5 minutes (with default settings) makes instances report not-ready.

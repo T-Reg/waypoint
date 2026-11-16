@@ -10,9 +10,11 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Key lifecycle across instances: register on startup, heartbeat, broadcast rotation, retire on
- * shutdown. A new key is always published in {@code gateway_keys} before it signs anything.
+ * shutdown. Registering a key notifies peers; a rotated key signs only after {@code publishGrace}.
  */
 public class KeyService {
+
+    public record Rotation(String kid, Instant activatesAt) {}
 
     private static final Logger log = LoggerFactory.getLogger(KeyService.class);
     private static final Duration DELETE_AFTER = Duration.ofDays(1);
@@ -25,14 +27,17 @@ public class KeyService {
     private final Duration staleAfter;
     private final Duration notReadyAfter;
     private final Duration liveInstanceWindow;
+    private final Duration publishGrace;
     // ReentrantLock rather than synchronized: these sections do JDBC on virtual threads.
     private final ReentrantLock lock = new ReentrantLock();
     private volatile long appliedGeneration = -1;
     private volatile Instant lastHeartbeat;
     private volatile int liveInstances = 1;
+    private volatile Rotation lastRotation;
 
     public KeyService(GatewayKeyStore keyStore, KeyRegistry registry, Clock clock, String instanceId,
-                      Duration tokenTtl, Duration clockSkew, Duration heartbeatInterval, Duration staleAfter) {
+                      Duration tokenTtl, Duration clockSkew, Duration heartbeatInterval, Duration staleAfter,
+                      Duration publishGrace) {
         this.keyStore = keyStore;
         this.registry = registry;
         this.clock = clock;
@@ -42,6 +47,10 @@ public class KeyService {
         // Stop taking traffic early enough that every token we minted expires before peers drop our key.
         this.notReadyAfter = staleAfter.minus(retention);
         this.liveInstanceWindow = heartbeatInterval.multipliedBy(3);
+        this.publishGrace = publishGrace;
+        if (publishGrace.isNegative()) {
+            throw new IllegalArgumentException("gateway.identity.key-publish-grace must not be negative");
+        }
         if (notReadyAfter.compareTo(heartbeatInterval.multipliedBy(2)) < 0) {
             throw new IllegalArgumentException("gateway.identity.key-stale-after must exceed token-ttl + clock-skew + 2 heartbeats");
         }
@@ -83,10 +92,12 @@ public class KeyService {
         OctetKeyPair previous = keyStore.currentSigningKey();
         OctetKeyPair next = GatewayKeyStore.generate();
         Instant now = clock.instant();
+        Instant activateAt = now.plus(publishGrace);
         registry.register(next, instanceId, now);
-        keyStore.activate(next);
-        registry.retire(previous.getKeyID(), now);
-        log.info("Rotated identity key {} -> {}", previous.getKeyID(), next.getKeyID());
+        keyStore.stage(next, activateAt).ifPresent(neverSigned -> registry.retire(neverSigned.getKeyID(), now));
+        registry.retire(previous.getKeyID(), activateAt);
+        lastRotation = new Rotation(next.getKeyID(), activateAt);
+        log.info("Rotating identity key {} -> {} at {}", previous.getKeyID(), next.getKeyID(), activateAt);
     }
 
     public void heartbeat() {
@@ -115,6 +126,11 @@ public class KeyService {
 
     public String currentKid() {
         return keyStore.hasSigningKey() ? keyStore.currentSigningKey().getKeyID() : null;
+    }
+
+    /** The most recent rotation this instance applied, or {@code null} if it has not rotated. */
+    public Rotation lastRotation() {
+        return lastRotation;
     }
 
     public long appliedGeneration() {

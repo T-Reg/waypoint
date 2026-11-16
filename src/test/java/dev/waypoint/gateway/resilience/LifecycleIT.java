@@ -22,8 +22,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
-/** R8–R12, R15: scale-up, graceful scale-down, crash, cross-instance identity, rotation broadcast, rolling restart. */
+/** R8–R12, R15, R21: scale-up, scale-down, crash, cross-instance identity, rotation broadcast, rolling restart, key NOTIFY. */
 class LifecycleIT extends ResilienceSupport {
+
+    private static final Duration NOTIFY_WINDOW = Duration.ofSeconds(5);
 
     @Test
     void r8_scaleUpServesCorrectlyOnceReadyAndPublishesItsKeyEverywhere() {
@@ -102,6 +104,35 @@ class LifecycleIT extends ResilienceSupport {
         seedBasics(b, 1000);
         b.get("/svc/x", token());
         assertThat(SignedJWT.parse(lastIdentity()).getHeader().getKeyID()).isEqualTo(after.get(1));
+    }
+
+    /** Poll and heartbeat are an hour apart, so peers can only learn keys through NOTIFY within the test window. */
+    @Test
+    void r21_newAndRotatedKeysReachPeersByNotifyBeforeTheySign() throws Exception {
+        TestGateway a = start(notifyOnlyNode("a"));
+        TestGateway b = start(notifyOnlyNode("b"));
+        seedBasics(a, 1000);
+        TestGateway c = start(notifyOnlyNode("c"));
+        String cKid = c.status().path("kid").asString();
+        await().atMost(NOTIFY_WINDOW).until(() -> kids(a).contains(cKid) && kids(b).contains(cKid));
+        assertThat(c.get("/svc/x", token()).statusCode()).isEqualTo(200);
+        assertThat(UpstreamVerifier.remote(a.managementPort(), "svc").accepts(lastIdentity())).isTrue();
+
+        List<TestGateway> all = List.of(a, b, c);
+        List<String> signing = all.stream().map(g -> g.status().path("kid").asString()).toList();
+        assertThat(a.rotateKeys().statusCode()).isEqualTo(200);
+        await().atMost(NOTIFY_WINDOW).until(() -> all.stream().allMatch(g -> kids(g).size() == 6 && kids(g).equals(kids(a))));
+        assertThat(kids(a)).containsAll(signing);
+        assertThat(all.stream().map(g -> g.status().path("kid").asString()).toList())
+                .as("no instance signs with its new key during the grace").isEqualTo(signing);
+    }
+
+    private TestGateway.Builder notifyOnlyNode(String name) {
+        return node(name)
+                .property("gateway.store.poll-interval", "1h")
+                .property("gateway.identity.heartbeat-interval", "1h")
+                .property("gateway.identity.key-stale-after", "3h")
+                .property("gateway.identity.key-publish-grace", "1h");
     }
 
     /** R15, the headline test: rolling restart under continuous load with zero failed requests. */

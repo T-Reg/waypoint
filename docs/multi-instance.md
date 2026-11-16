@@ -1,6 +1,6 @@
 # Multi-Instance Operation
 
-Part of the [design](design.md). Covers the shared PostgreSQL config store, propagation, lifecycle (reboot, scale-up, scale-down) and shared rate limiting. Test cases R1–R20 are in [testing.md](testing.md#multi-instance-resilience-r1r20).
+Part of the [design](design.md). Covers the shared PostgreSQL config store, propagation, lifecycle (reboot, scale-up, scale-down) and shared rate limiting. Test cases R1–R21 are in [testing.md](testing.md#multi-instance-resilience-r1r21).
 
 ## 1. Shared config store
 
@@ -26,9 +26,9 @@ Part of the [design](design.md). Covers the shared PostgreSQL config store, prop
 4. If the DB is unreachable, return **503** without changing anything. Writes never half-apply.
 
 **Propagation to every instance:**
-- **Push:** each instance holds a dedicated `LISTEN gateway_events` connection (`application_name = waypoint-listen-<instance>`). Payloads are `config:<revision>` and `keys:<generation>`. It's a direct (or session-mode) connection, because `LISTEN` doesn't work through PgBouncer transaction pooling ([PgBouncer features](https://www.pgbouncer.org/features.html)), which DigitalOcean connection pools use. On a notification with a revision newer than its own, it reloads the full snapshot in one read-only transaction, validates it, builds a new table and swaps it in atomically ([design.md §5](design.md#5-dynamic-routing)).
+- **Push:** each instance holds a dedicated `LISTEN gateway_events` connection (`application_name = waypoint-listen-<instance>`). Payloads are `config:<revision>`, `keys:<generation>` (a rotation) and `key:<kid>` (a key was registered, sent in the same statement as the insert). Every payload triggers the same refresh, which also reloads peers' public keys. It's a direct (or session-mode) connection, because `LISTEN` doesn't work through PgBouncer transaction pooling ([PgBouncer features](https://www.pgbouncer.org/features.html)), which DigitalOcean connection pools use. On a notification with a revision newer than its own, it reloads the full snapshot in one read-only transaction, validates it, builds a new table and swaps it in atomically ([design.md §5](design.md#5-dynamic-routing)).
 - **Poll fallback:** every `gateway.store.poll-interval` (default 10s), the instance compares its revision against the `config_revision` row. It also checks the key generation and validates the LISTEN connection periodically, since a half-open TCP connection would otherwise wait forever. This covers missed notifications, a dropped `LISTEN` connection, or DB failover. The `LISTEN` connection reconnects with backoff.
-- **Bound:** propagation normally takes milliseconds (push). The worst case is the poll interval.
+- **Bound:** propagation normally takes milliseconds (push). The worst case is the poll interval. Rotated identity keys wait `key-publish-grace` (default: the poll interval) before signing, so that worst case is covered for them too ([identity.md](identity.md#jwks-endpoint-in-scope)).
 - **Bad entries:** each route and tenant is validated individually.
   - An invalid entry is skipped, and its prefix fails closed with 503. The rest of the snapshot loads normally, and the gateway logs an error and increments a metric.
   - This applies at startup too, so one bad row can't stop new instances from becoming ready. The lesson comes from [Cloudflare's 18 Nov 2025 outage](https://blog.cloudflare.com/18-november-2025-outage/).
@@ -51,16 +51,16 @@ Part of the [design](design.md). Covers the shared PostgreSQL config store, prop
 
 **Security of the store:**
 - The DB credentials come from env/secret, never the repo.
-- Connections use TLS (`sslmode=verify-full` against DigitalOcean's CA cert).
+- Connections use TLS (`sslmode=verify-full` against DigitalOcean's CA cert; on App Platform the JDBC driver's `SingleCertValidatingFactory` reads the CA from an env var, see [deployment.md](deployment.md)).
 - Two DB users:
-  - The migration user (DDL) is used only by Flyway.
+  - The migration user (DDL) is used only by Flyway. Migration refuses to start until the app role exists, because the V2 grants run only once (R22).
   - The app user has DML on the gateway tables, and only `INSERT`/`SELECT` on `config_audit`.
 - All SQL is parameterized.
 - Upstream URLs are **re-validated when loaded** from the DB, not just on write, so a tampered row can't point a route at an attacker-chosen host without being rejected.
 
 **Rate limiting with multiple instances:** quotas are shared through Valkey (§2), so scaling the gateway doesn't change any tenant's effective quota.
 
-**Resilience tests:** R1–R20 and the `compose-smoke` job in [testing.md](testing.md#multi-instance-resilience-r1r20).
+**Resilience tests:** R1–R21 and the `compose-smoke` job in [testing.md](testing.md#multi-instance-resilience-r1r21).
 
 ## 2. Shared rate limiting (Valkey)
 
@@ -83,7 +83,8 @@ Part of the [design](design.md). Covers the shared PostgreSQL config store, prop
 
 **Security:**
 - TLS (`rediss://`).
-- A dedicated ACL user limited to `rl:*` keys, `EVALSHA`/`EVAL`/`SCRIPT LOAD`, the commands the script calls (`ZADD`, `ZREMRANGEBYSCORE`, `ZCARD`, `ZRANGE`, `PEXPIRE`, `TIME`), and `@connection` (see `docker-compose.yml`).
+- Where ACLs are supported, a dedicated ACL user limited to `rl:*` keys, `EVALSHA`/`EVAL`/`SCRIPT LOAD`, the commands the script calls (`ZADD`, `ZREMRANGEBYSCORE`, `ZCARD`, `ZRANGE`, `PEXPIRE`, `TIME`), and `@connection` (see `docker-compose.yml`).
+- DigitalOcean Managed Valkey doesn't support ACL users, so there the gateway uses the `default` user on a cluster dedicated to it, restricted by trusted sources.
 - Credentials come from env/secret only.
 
 **Accepted gaps:**

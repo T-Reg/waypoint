@@ -13,13 +13,15 @@ Run everything with `./mvnw verify`. Surefire picks up `*Test` (unit), `*Propert
 | Policy stages (allowlist, 404/405/403/429, ordering) | `pipeline/StagesTest`, `it/GatewayProxyIT` |
 | Routes, tenants, SSRF validation | `routing/*Test`, `tenant/TenantValidatorTest`, `it/AdminApiIT` |
 | Proxy headers, client IP, streaming, 502/504/413 | `proxy/*Test`, `it/GatewayProxyIT` |
+| Pipeline and proxy error branches: unexpected exception → 500 `internal`, no upstream call, still audited (even if the 500 can't be written); connect timeout and interrupted upstream call → 502; `X-Forwarded-Proto` taken from a trusted proxy only when `http`/`https`; `X-Forwarded-Host` only for a well-formed `Host`; a query the upstream URI can't carry (`?a=%zz`) → 400 `request.bad_path` | `pipeline/GatewayPipelineTest` (stub `UpstreamClient`), `it/GatewayProxyIT` |
+| Admin listener path hygiene: `;` path parameters and percent-encoded characters → 404 `admin.not_found` | `it/AdminApiIT` |
 | Upstream body idle timeout and mid-body failures: steady body longer than `timeoutMs` streams fully; stall or drop before commit → 504/502 without upstream headers; stall or drop after commit → connection aborted with no terminating chunk and the audit `error_code` set | `proxy/IdleTimeoutRelayTest`, `it/GatewayProxyIT` (raw-socket `support/StallingUpstream`) |
 | Rate limiting | `ratelimit/LocalRateLimiterTest`, `ratelimit/LocalRateLimiterProperties`, `ratelimit/ResilientRateLimiterTest`, `ratelimit/ValkeyRateLimiterIT`, `ratelimit/ValkeySharedQuotaProperties` |
 | Audit log | `audit/AuditTest`, audit assertions in `it/GatewayProxyIT` and `it/AdminApiIT` |
 | Identity token & JWKS | `identity/*Test`, `identity/IdentityTokenProperties`, `it/IdentityIT`, `it/GatewayProxyIT` |
-| Config store, migrations, least privilege | `store/PostgresConfigStoreIT`, `store/SnapshotSwapProperties` |
+| Config store, migrations, least privilege (incl. migration refused when the app role is missing) | `store/PostgresConfigStoreIT`, `store/SnapshotSwapProperties` |
 | Token CLI | `cli/TokenCliTest` |
-| Multi-instance R1–R20 | `resilience/ConfigPropagationIT` (R1–R5, R13, R14), `resilience/DatabaseOutageIT` (R6, R7, R20), `resilience/LifecycleIT` (R8–R12, R15), `resilience/SharedQuotaIT` (R16–R19) |
+| Multi-instance R1–R22 | `resilience/ConfigPropagationIT` (R1–R5, R13, R14), `resilience/DatabaseOutageIT` (R6, R7, R20, R22), `resilience/LifecycleIT` (R8–R12, R15, R21), `resilience/SharedQuotaIT` (R16–R19) |
 
 ## Identity token & JWKS
 
@@ -33,17 +35,19 @@ Design: [identity.md §2](identity.md#2-identity-propagation-to-upstreams).
 | Unit | Verification fails for: a tampered payload, a token signed by a key not in the JWKS, an expired token, the wrong `aud`, the wrong `iss`, the wrong `typ`, and `alg` other than Ed25519. |
 | Unit | Verification ignores `jku`/`x5u`/`jwk` headers. A token pointing at an attacker key is rejected. |
 | Unit | Rotation: right after `rotate()`, both keys are published and new tokens use the new `kid`. After TTL + skew (fake clock), the old key is gone. |
+| Unit | Staged key (fake clock): published at once, signs only from `activateAt`; the previous key's retention counts from activation; re-staging drops the earlier staged key; zero grace activates immediately; two racing readers promote the staged key exactly once (latch-paused clock). |
+| Integration (PostgreSQL) | `KeyServiceIT`: registering a key sends `key:<kid>` only after the row commits (a failed insert sends nothing); rotation publishes the new key in `gateway_keys` while the old one still signs; the old key's `retired_at` is its activation time; a re-rotation within the grace retires the never-used key; `retired_at` never moves earlier; a negative grace is rejected. |
 | Property (jqwik) | For arbitrary `tid`/`sub`/`scope`, mint → verify via JWKS round-trips the claims exactly. |
 | Property (jqwik) | Flipping any single byte of a minted token makes verification fail. |
 | Integration | `GET /.well-known/jwks.json` on the management listener returns 200 with the right content type and cache header. On the admin listener it returns 404. The public listener never serves it: unauthenticated callers get 401 (auth runs first), and an authenticated tenant whose allowlist covers the path gets 404. |
 | Integration | Full path: client → gateway → WireMock upstream. The test captures `X-Gateway-Identity`, fetches the JWKS **from the running gateway**, and verifies the token with Nimbus `JWKSource` exactly as a real upstream would. It asserts `tid`, `sub`, `scope`, `aud = route.audience`, `exp ≤ 60s`, and `rid` equal to `X-Request-Id`. |
 | Integration | Audience binding: a token captured from route A is rejected by a verifier configured for route B's audience. |
-| Integration | Rotation end to end: capture a token, call `POST /admin/keys/rotate`, capture a second token. Both verify during the overlap, and the second has the new `kid`. A verifier with the old cached JWKS refetches on the unknown `kid` and succeeds. |
+| Integration | Rotation end to end: capture a token, call `POST /admin/keys/rotate`, and check that the new `kid` is in the JWKS right away. Once it activates, capture a second token. Both verify during the overlap, and the second has the new `kid`. A verifier with the old cached JWKS refetches on the unknown `kid` and succeeds. |
 | Integration | Rotate without an admin JWT returns 401, with a customer token returns 401, and with an `admin:routes`-only token returns 403. Through the public listener, an admin token gets 401 and an allowlisted customer token gets 404. |
 | Integration | Spoofing: a client-sent `X-Gateway-Identity` is stripped and replaced, and `Connection: X-Gateway-Identity, X-Request-Id` doesn't remove the gateway's headers. The upstream receives only the gateway-minted token. |
 | Integration | Rejected requests (401/403/429) mint no identity token, and the upstream receives zero requests. |
 
-## Multi-instance resilience (R1–R20)
+## Multi-instance resilience (R1–R22)
 
 Design: [multi-instance.md](multi-instance.md).
 
@@ -71,6 +75,8 @@ Conventions: JUnit tag `resilience`; Testcontainers PostgreSQL + Valkey (+ Toxip
 | R18 | **Valkey outage:** pause the Valkey container under load | Zero 5xx; the limiter is degraded to RPM ÷ live instances; the `ratelimit.degraded` metric is set; after unpause, shared counting resumes automatically |
 | R19 | **Valkey slow:** add latency above the command timeout (Toxiproxy) | Requests aren't slowed beyond the timeout; the limiter degrades rather than blocking |
 | R20 | **Partition:** cut only B's DB connection (Toxiproxy) | B keeps serving; tokens minted by B verify via A's JWKS. B reports not-ready once its heartbeat is stale for `key-stale-after − TTL − skew`; at that moment A still publishes B's key, and A drops it only after `key-stale-after` |
+| R21 | **Key NOTIFY:** A, B and C with poll and heartbeat set to 1h and `key-publish-grace` set to 1h, so only NOTIFY can deliver keys | C's key appears in A's and B's JWKS within 5s of C becoming ready, and a token minted by C verifies via A's JWKS. After a rotation on A, every instance's JWKS lists all six keys (three current, three staged) within 5s, while every instance still signs with its old key |
+| R22 | **App role missing at startup:** start A on an empty DB with `gateway.store.app-role` naming a role that doesn't exist, then create the role | A stays not-ready, serves 503 and migrates nothing; once the role exists, A becomes ready and the role has the V2 grants |
 
 ## Container smoke test (`compose-smoke` CI job)
 

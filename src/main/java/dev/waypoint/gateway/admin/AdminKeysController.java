@@ -21,12 +21,13 @@ public class AdminKeysController {
         this.keys = keys;
     }
 
-    /** Broadcasts a rotation; this instance rotates before responding, the rest on NOTIFY or poll. */
+    /** Broadcasts a rotation; every instance publishes its new key now and signs with it from {@code activatesAt}. */
     @PostMapping("/rotate")
     public Map<String, Object> rotate(@RequestAttribute(AdminGate.IDENTITY_ATTRIBUTE) AdminIdentity admin) {
         AdminSupport.requireScope(admin, AdminSupport.SCOPE_KEYS);
         long generation = store.rotateKeys(admin.subject());
         keys.applyGeneration(generation);
-        return Map.of("generation", generation, "kid", keys.currentKid());
+        KeyService.Rotation rotation = keys.lastRotation();
+        return Map.of("generation", generation, "kid", rotation.kid(), "activatesAt", rotation.activatesAt().toString());
     }
 }

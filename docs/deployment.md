@@ -1,0 +1,200 @@
+# Deploying to DigitalOcean
+
+Part of the [design](design.md). This guide runs Waypoint on App Platform with managed PostgreSQL and Valkey. Infrastructure is provisioned by hand with `doctl` and the control panel; the repo holds only the app spec template (`.do/app.yaml`).
+
+## Architecture
+
+```
+Internet ──HTTPS──► App Platform edge (TLS, load balancer, health checks, rolling deploys)
+                          │ HTTP :8080 only
+                          ▼
+              gateway service × 2  (:8080 public; :8081 admin and :8082 management are internal_ports)
+                │            │                 │
+     private network     HTTPS            TLS, trusted sources = this app
+                ▼            ▼                 ▼
+     upstream service   public API      Managed PostgreSQL 16 (config store)
+     (WireMock, internal) (e.g. httpbin) Managed Valkey 8 (shared quotas)
+```
+
+| Local stack | On DigitalOcean |
+|---|---|
+| HAProxy | App Platform load balancer. Health check: port 8082, `/actuator/health/readiness` |
+| Readiness wait before SIGTERM (`GATEWAY_SHUTDOWN_DELAY`) | `termination.drain_seconds` (15s) removes the instance from the LB *before* SIGTERM, so the delay is only 5s. `grace_period_seconds` (60s) covers it plus the 30s drain |
+| `init-roles.sh` | Users created with `doctl`; `doadmin` runs the grants (step 3) |
+| Valkey ACL user limited to `rl:*` | Managed Valkey has no ACL users ([limits](https://docs.digitalocean.com/products/databases/valkey/details/limits/)). The gateway uses `default` on a cluster dedicated to it |
+| Seed file | None. Routes and tenants are created through the admin API (step 6) |
+| Admin port on localhost | Internal port only; reached from the App Platform console |
+
+Approximate cost: two `apps-s-1vcpu-1gb` gateways (about $24/mo), one small upstream (about $5/mo), and 1 GB PostgreSQL and Valkey clusters (about $15/mo each). Check current pricing, and tear everything down when you're finished (step 8).
+
+## 0. Prerequisites
+
+```bash
+brew install doctl libpq jq yq && brew link --force libpq
+doctl auth init --context waypoint && doctl auth switch --context waypoint
+doctl account get
+```
+
+Use one region throughout. App Platform regions map to a single datacenter ([table](https://docs.digitalocean.com/products/app-platform/how-to/enable-vpc/)). This guide uses `sfo` (app) and `sfo3` (databases).
+
+## 1. Production keys and secrets
+
+Keep them outside the repo, separate from `dev-keys/`:
+
+```bash
+mkdir -m 700 ~/waypoint-prod-keys && cd ~/waypoint-prod-keys
+<repo>/scripts/token-cli keygen --out-dir ~/waypoint-prod-keys --name issuer
+<repo>/scripts/token-cli keygen --out-dir ~/waypoint-prod-keys --name admin
+(umask 077; openssl rand -base64 32 > ~/waypoint-prod-keys/audit-hmac.key)
+```
+
+Only the two public JWKs and the HMAC key are uploaded. The private keys stay on the operator's machine.
+
+## 2. Managed PostgreSQL and Valkey
+
+```bash
+doctl databases create waypoint-pg     --engine pg     --version 16 --region sfo3 --size db-s-1vcpu-1gb --num-nodes 1
+doctl databases create waypoint-valkey --engine valkey --version 8  --region sfo3 --size db-s-1vcpu-1gb --num-nodes 1
+doctl databases list            # wait for "online"
+PG_ID=<id>; VK_ID=<id>
+doctl databases db create   $PG_ID waypoint
+doctl databases user create $PG_ID waypoint_migrator
+doctl databases user create $PG_ID waypoint_app
+```
+
+`doctl` masks passwords (`********`). Copy them from the control panel instead: **Databases → cluster → Overview → Connection Details → show**, and **Users & Databases → show** for each user.
+
+## 3. PostgreSQL roles
+
+Connect as `doadmin` (host from Connection Details; paste the password when prompted):
+
+```bash
+psql "host=<pg-host> port=25060 user=doadmin dbname=waypoint sslmode=require"
+```
+```sql
+REVOKE ALL ON DATABASE waypoint FROM PUBLIC;
+GRANT CONNECT ON DATABASE waypoint TO waypoint_app, waypoint_migrator;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO waypoint_migrator;   -- Flyway creates and owns the tables
+GRANT USAGE ON SCHEMA public TO waypoint_app;                -- the V2 migration grants DML
+```
+
+`waypoint_app` must exist before the first boot, because V2's grants run only once. If it's missing, the gateway refuses to migrate, stays not-ready and logs `App role 'waypoint_app' does not exist` (tested by R22).
+
+Save the migrator password for step 5:
+
+```bash
+(umask 077; pbpaste > ~/waypoint-prod-keys/pg-migrator.pw)   # after copying it from the panel
+```
+
+## 4. Authorize GitHub
+
+In the control panel, go to **Apps → Create App → GitHub** and install the DigitalOcean GitHub app for **only** the `waypoint` repo. Then cancel the wizard. `doctl` creates the app in step 5.
+
+## 5. Create the app
+
+Fill a git-ignored copy of the spec:
+
+```bash
+cp .do/app.yaml .do/app.local.yaml
+K=~/waypoint-prod-keys
+export MIGRATOR_PW="$(cat $K/pg-migrator.pw)" HMAC="$(cat $K/audit-hmac.key)" \
+       ISSUER_JWK="$(jq -c . $K/issuer.public.jwk.json)" ADMIN_JWK="$(jq -c . $K/admin.public.jwk.json)"
+yq -i '
+  (.services[0].envs[] | select(.key == "GATEWAY_STORE_MIGRATION_PASSWORD")).value = strenv(MIGRATOR_PW) |
+  (.services[0].envs[] | select(.key == "GATEWAY_AUDIT_HMAC_KEY")).value = strenv(HMAC) |
+  (.services[0].envs[] | select(.key == "GATEWAY_CUSTOMER_PUBLIC_JWK")).value = strenv(ISSUER_JWK) |
+  (.services[0].envs[] | select(.key == "GATEWAY_ADMIN_PUBLIC_JWK")).value = strenv(ADMIN_JWK)
+' .do/app.local.yaml
+unset MIGRATOR_PW HMAC
+grep -c REPLACE_ME .do/app.local.yaml        # expect 0
+
+doctl apps spec validate .do/app.local.yaml
+doctl apps create --spec .do/app.local.yaml
+rm .do/app.local.yaml                        # DO stores the secrets encrypted; `doctl apps spec get` returns them as EV[...]
+```
+
+The spec wires the database connections through [bindable variables](https://docs.digitalocean.com/products/app-platform/how-to/use-environment-variables/):
+- `DATABASE_URL` uses `sslmode=verify-full` with the JDBC driver's `SingleCertValidatingFactory`, which reads the cluster CA from `DATABASE_CA_CERT` (`${pg.CA_CERT}`), so no certificate file is needed.
+- `DATABASE_USERNAME`/`PASSWORD` come from `db_user: waypoint_app`.
+- `VALKEY_URL` is `${valkey.DATABASE_URL}` (`rediss://`, which uses a Let's Encrypt certificate trusted by the JVM).
+- Attaching both clusters adds the app to their trusted sources.
+
+If `spec validate` rejects the `VALKEY` database engine, take that entry out of `databases`. Then set `VALKEY_URL` by hand to `rediss://default:<password>@<host>:<port>`, and add the app to the Valkey cluster's trusted sources yourself.
+
+Follow the build and deploy:
+
+```bash
+APP_ID=$(doctl apps list --format ID,Spec.Name --no-header | awk '$2 == "waypoint" {print $1}')
+doctl apps logs $APP_ID gateway --type build --follow
+doctl apps logs $APP_ID gateway --type run --follow     # expect "Gateway ready at config revision 0"
+```
+
+If the deploy fails health checks, the run log shows why. `Startup not complete, retrying` lines carry the database or Valkey error.
+
+## 6. Configure routes and tenants
+
+The admin API isn't exposed publicly. Issue a short-lived admin token locally:
+
+```bash
+./scripts/token-cli issue-admin --key ~/waypoint-prod-keys/admin.private.jwk.json \
+    --sub <your-name> --scope "admin:routes admin:tenants" --ttl 10m
+```
+
+Open a shell in a gateway container with `doctl apps console $APP_ID gateway` (or the app's **Console** tab), then run:
+
+```bash
+export ADMIN='<paste token>'
+admin() { curl -s -X PUT -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' "localhost:8081/admin/$1" -d "$2"; echo; }
+
+admin routes/weather '{"pathPrefix":"/weather","upstreams":[{"url":"http://upstream:8080"}],
+  "requiredScopes":{"GET":["weather:read"]},"audience":"weather-svc","allowPrivateNetwork":true}'
+admin routes/echo '{"pathPrefix":"/echo","upstreams":[{"url":"https://httpbin.org"}],
+  "stripPrefix":true,"requiredScopes":{"*":["echo:read"]}}'
+admin tenants/acme   '{"allowedPathPrefixes":["/weather","/echo"],"requestsPerMinute":600}'
+admin tenants/globex '{"allowedPathPrefixes":["/weather"],"requestsPerMinute":60}'
+
+curl -s localhost:8082/internal/status; echo           # revision 4 on this instance
+```
+
+The changes reach the other instance through `LISTEN/NOTIFY`. `/weather` goes to the internal WireMock upstream, which returns 400 unless `X-Gateway-Identity` is present and `Authorization` is absent. `/echo` goes to a public API that echoes the headers it receives.
+
+## 7. Smoke test
+
+```bash
+APP_URL=https://$(doctl apps get $APP_ID --format DefaultIngress --no-header | sed 's#https://##')
+issue() { ./scripts/token-cli issue --key ~/waypoint-prod-keys/issuer.private.jwk.json --tenant "$1" --sub demo --scope "$2"; }
+ACME=$(issue acme "weather:read echo:read"); GLOBEX=$(issue globex "weather:read")
+
+curl -si $APP_URL/weather/today | head -1                                   # 401: no token
+curl -s  -H "Authorization: Bearer $ACME" $APP_URL/weather/today            # {"upstream":"ok"}
+curl -s  -H "Authorization: Bearer $ACME" $APP_URL/echo/headers             # X-Gateway-Identity present, no Authorization
+curl -si -H "Authorization: Bearer $GLOBEX" $APP_URL/echo/headers | head -1 # 403: path not allowed for globex
+curl -si -H "Authorization: Bearer $(issue acme weather:read)" $APP_URL/echo/headers | head -1   # 403: scope missing
+for i in $(seq 70); do curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $GLOBEX" $APP_URL/weather/x; done | sort | uniq -c   # 60 × 200, 10 × 429
+doctl apps logs $APP_ID gateway --type run | grep '"tenant_id"' | tail -3   # audit entries
+```
+
+Zero-downtime deploy: keep a request loop running against `$APP_URL/weather/x` while running `doctl apps create-deployment $APP_ID`. The drain, readiness and graceful shutdown should produce no errors.
+
+## 8. Hardening and teardown
+
+- **Trusted sources:** confirm both clusters list only the app (**Settings → Trusted sources**). Add your own IP only temporarily, when you need `psql`.
+- **Valkey eviction policy:** if the cluster offers one, choose `noeviction`. Under memory pressure the limiter then degrades to local quotas instead of silently forgetting a tenant's window.
+- **Alerts and logs:** add app alerts (CPU, memory, restart count) and database alerts. Forward logs to a log destination so audit entries are kept beyond App Platform's log buffer.
+- **Deploys:** `deploy_on_push` is off. Run `doctl apps create-deployment $APP_ID` after CI is green on `main`.
+- **Optional:** a custom domain (**Settings → Domains**), and VPC egress so the app reaches the databases on private hostnames.
+
+Teardown:
+
+```bash
+doctl apps delete $APP_ID
+doctl databases delete $PG_ID
+doctl databases delete $VK_ID
+```
+
+## Known gaps on this platform
+
+- **Valkey `default` user:** leaked credentials give full access to the cluster. Mitigations: a cluster dedicated to the gateway, TLS and trusted sources.
+- **Client IP:** App Platform sends the client IP in `do-connecting-ip` and the ingress IP in `X-Forwarded-For` ([DO support](https://docs.digitalocean.com/support/where-can-i-find-the-client-ip-address-of-a-request-connecting-to-my-app)). The gateway reads only `X-Forwarded-For`, so the audit `client_ip` is the ingress address.
+- **Internal ports:** any component of the app can reach the admin and management ports. The admin API still requires an admin JWT.

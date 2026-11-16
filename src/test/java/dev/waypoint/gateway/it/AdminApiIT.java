@@ -6,6 +6,7 @@ import tools.jackson.databind.JsonNode;
 import dev.waypoint.gateway.support.AuditCapture;
 import dev.waypoint.gateway.support.Containers;
 import dev.waypoint.gateway.support.Db;
+import dev.waypoint.gateway.support.RawHttp;
 import dev.waypoint.gateway.support.TestGateway;
 import dev.waypoint.gateway.support.TestTokens;
 import java.net.http.HttpResponse;
@@ -14,6 +15,8 @@ import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class AdminApiIT {
 
@@ -45,6 +48,14 @@ class AdminApiIT {
 
     static String code(HttpResponse<String> response) {
         return TestGateway.json(response).path("code").asString();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/admin/routes;x", "/admin/routes/a%41"})
+    void pathParametersAndEncodedCharactersAre404(String rawPath) throws Exception {
+        RawHttp.Response response = RawHttp.get(gw.adminPort(), rawPath, "Authorization: Bearer " + ROUTES);
+        assertThat(response.status()).isEqualTo(404);
+        assertThat(response.body()).contains("\"code\":\"admin.not_found\"");
     }
 
     @Test

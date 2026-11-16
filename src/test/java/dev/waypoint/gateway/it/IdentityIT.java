@@ -6,6 +6,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.anyRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.anyUrl;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import tools.jackson.databind.JsonNode;
 import com.github.tomakehurst.wiremock.WireMockServer;
@@ -15,6 +16,8 @@ import dev.waypoint.gateway.support.TestGateway;
 import dev.waypoint.gateway.support.TestTokens;
 import dev.waypoint.gateway.support.UpstreamVerifier;
 import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
@@ -93,9 +96,11 @@ class IdentityIT {
         assertThat(rotated.statusCode()).isEqualTo(200);
         String newKid = TestGateway.json(rotated).path("kid").asString();
         assertThat(newKid).isNotEqualTo(oldKid);
+        assertThat(Instant.parse(TestGateway.json(rotated).path("activatesAt").asString())).isAfter(Instant.now().minusSeconds(5));
+        assertThat(gw.jwks().path("keys").findValuesAsString("kid")).as("new key published before it signs").contains(oldKid, newKid);
 
+        await().atMost(Duration.ofSeconds(5)).until(() -> SignedJWT.parse(captureIdentity("/a/x")).getHeader().getKeyID().equals(newKid));
         String after = captureIdentity("/a/x");
-        assertThat(SignedJWT.parse(after).getHeader().getKeyID()).isEqualTo(newKid);
         List<String> published = gw.jwks().path("keys").findValuesAsString("kid");
         assertThat(published).contains(oldKid, newKid);
         assertThat(cached.accepts(before)).as("old token valid during overlap").isTrue();

@@ -84,6 +84,7 @@ gateway:
     token-ttl: 60s
     heartbeat-interval: 10s
     key-stale-after: 10m
+    key-publish-grace: 10s
   audit:
     path-hmac-key: ${GATEWAY_AUDIT_HMAC_KEY:}
   proxy:
