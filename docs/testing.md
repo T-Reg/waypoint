@@ -13,6 +13,7 @@ Run everything with `./mvnw verify`. Surefire picks up `*Test` (unit), `*Propert
 | Policy stages (allowlist, 404/405/403/429, ordering) | `pipeline/StagesTest`, `it/GatewayProxyIT` |
 | Routes, tenants, SSRF validation | `routing/*Test`, `tenant/TenantValidatorTest`, `it/AdminApiIT` |
 | Proxy headers, client IP, streaming, 502/504/413 | `proxy/*Test`, `it/GatewayProxyIT` |
+| Upstream body idle timeout and mid-body failures: steady body longer than `timeoutMs` streams fully; stall or drop before commit → 504/502 without upstream headers; stall or drop after commit → connection aborted with no terminating chunk and the audit `error_code` set | `proxy/IdleTimeoutRelayTest`, `it/GatewayProxyIT` (raw-socket `support/StallingUpstream`) |
 | Rate limiting | `ratelimit/LocalRateLimiterTest`, `ratelimit/LocalRateLimiterProperties`, `ratelimit/ResilientRateLimiterTest`, `ratelimit/ValkeyRateLimiterIT`, `ratelimit/ValkeySharedQuotaProperties` |
 | Audit log | `audit/AuditTest`, audit assertions in `it/GatewayProxyIT` and `it/AdminApiIT` |
 | Identity token & JWKS | `identity/*Test`, `identity/IdentityTokenProperties`, `it/IdentityIT`, `it/GatewayProxyIT` |

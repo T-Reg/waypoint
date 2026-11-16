@@ -7,6 +7,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.anyUrl;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import tools.jackson.databind.JsonNode;
 import com.github.tomakehurst.wiremock.WireMockServer;
@@ -17,10 +18,15 @@ import dev.waypoint.gateway.support.AuditCapture;
 import dev.waypoint.gateway.support.Containers;
 import dev.waypoint.gateway.support.Db;
 import dev.waypoint.gateway.support.RawHttp;
+import dev.waypoint.gateway.support.StallingUpstream;
+import dev.waypoint.gateway.support.StallingUpstream.Then;
 import dev.waypoint.gateway.support.TestGateway;
 import dev.waypoint.gateway.support.TestTokens;
 import dev.waypoint.gateway.support.UpstreamVerifier;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -41,6 +47,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 class GatewayProxyIT {
 
     static WireMockServer upstream;
+    static StallingUpstream stalling;
     static TestGateway gw;
     static Db db;
     static AuditCapture audit;
@@ -50,6 +57,7 @@ class GatewayProxyIT {
     static void start() throws IOException {
         upstream = new WireMockServer(options().dynamicPort());
         upstream.start();
+        stalling = StallingUpstream.start();
         String dbUrl = Containers.newDatabase();
         db = new Db(dbUrl);
         gw = TestGateway.builder(dbUrl).name("proxy-it").property("gateway.proxy.max-request-bytes", 1_000_000).startReady();
@@ -59,7 +67,7 @@ class GatewayProxyIT {
         try (ServerSocket socket = new ServerSocket(0)) {
             closedPort = socket.getLocalPort();
         }
-        gw.upsertTenant("acme", "{\"allowedPathPrefixes\":[\"/weather\",\"/maps\",\"/files\",\"/slow\",\"/dead\",\"/third\",\"/open\","
+        gw.upsertTenant("acme", "{\"allowedPathPrefixes\":[\"/weather\",\"/maps\",\"/files\",\"/slow\",\"/stall\",\"/dead\",\"/third\",\"/open\","
                 + "\"/admin\",\"/blocked\",\"/self\",\"/selfip\",\"/broken\",\"/nowhere\",\"/.well-known\"],\"requestsPerMinute\":10000}");
         gw.upsertTenant("globex", "{\"allowedPathPrefixes\":[\"/weather\"],\"requestsPerMinute\":10000}");
         gw.upsertTenant("initech", "{\"allowedPathPrefixes\":[\"/weather\"],\"requestsPerMinute\":10000,\"disabled\":true}");
@@ -69,6 +77,7 @@ class GatewayProxyIT {
         gw.upsertRoute("maps", route("/maps", up, "{\"*\":[\"maps:read\"]}", ""));
         gw.upsertRoute("files", route("/files", up, "{\"*\":[]}", ",\"stripPrefix\":true"));
         gw.upsertRoute("slow", route("/slow", up, "{\"*\":[]}", ",\"timeoutMs\":300"));
+        gw.upsertRoute("stall", route("/stall", "http://127.0.0.1:" + stalling.port(), "{\"*\":[]}", ",\"timeoutMs\":300"));
         gw.upsertRoute("dead", route("/dead", "http://127.0.0.1:" + closedPort, "{\"*\":[]}", ""));
         gw.upsertRoute("third", route("/third", up, "{\"*\":[]}", ",\"forwardIdentity\":false"));
         gw.upsertRoute("open", route("/open", up, "{\"*\":[]}", ""));
@@ -88,10 +97,11 @@ class GatewayProxyIT {
     }
 
     @AfterAll
-    static void stop() {
+    static void stop() throws IOException {
         audit.close();
         gw.close();
         upstream.stop();
+        stalling.close();
     }
 
     @BeforeEach
@@ -253,6 +263,94 @@ class GatewayProxyIT {
         HttpResponse<String> response = gw.get("/slow/x", acme(""));
         assertThat(response.statusCode()).isEqualTo(504);
         assertThat(problem(response).path("code").asString()).isEqualTo("upstream.timeout");
+    }
+
+    @Test
+    void steadyBodyLongerThanTheTimeoutIsNotCutOff() {
+        String body = "0123456789".repeat(6);
+        upstream.stubFor(any(urlPathMatching("/slow/steady")).willReturn(aResponse().withStatus(200).withBody(body)
+                .withChunkedDribbleDelay(6, 600)));
+        HttpResponse<String> response = gw.get("/slow/steady", acme(""));
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo(body);
+    }
+
+    @Test
+    void bodyStallBeforeAnyByteIs504WithoutUpstreamHeaders() {
+        stalling.respondChunked(0, Then.STALL);
+        HttpResponse<String> response = gw.get("/stall/x", acme(""));
+        assertThat(response.statusCode()).isEqualTo(504);
+        assertThat(problem(response).path("code").asString()).isEqualTo("upstream.timeout");
+        assertThat(response.headers().firstValue("X-Upstream")).isEmpty();
+        assertThat(errorCode(response.headers().firstValue("X-Request-Id").orElseThrow())).isEqualTo("upstream.timeout");
+    }
+
+    @Test
+    void bodyStallAfterCommitAbortsTheConnection() throws IOException {
+        stalling.respondChunked(64 * 1024, Then.STALL);
+        RawHttp.Response response = RawHttp.get(gw.publicPort(), "/stall/x", "Authorization: Bearer " + acme(""));
+        assertAbortedMidBody(response, 64 * 1024);
+        assertThat(errorCode(requestId(response))).isEqualTo("upstream.timeout");
+    }
+
+    @Test
+    void upstreamDropBeforeAnyByteIs502() {
+        stalling.respondChunked(0, Then.DROP);
+        HttpResponse<String> response = gw.get("/stall/x", acme(""));
+        assertThat(response.statusCode()).isEqualTo(502);
+        assertThat(problem(response).path("code").asString()).isEqualTo("upstream.unavailable");
+        assertThat(response.headers().firstValue("X-Upstream")).isEmpty();
+    }
+
+    @Test
+    void upstreamDropAfterCommitAbortsTheConnection() throws IOException {
+        stalling.respondChunked(64 * 1024, Then.DROP);
+        RawHttp.Response response = RawHttp.get(gw.publicPort(), "/stall/x", "Authorization: Bearer " + acme(""));
+        assertAbortedMidBody(response, 64 * 1024);
+        assertThat(errorCode(requestId(response))).isEqualTo("upstream.stream_interrupted");
+    }
+
+    @Test
+    void clientDisconnectMidBodyIsAuditedAsStreamInterrupted() throws IOException {
+        stalling.respondChunked(16 * 1024 * 1024, Then.STALL);
+        String requestId;
+        try (Socket client = new Socket("127.0.0.1", gw.publicPort())) {
+            client.getOutputStream().write(("GET /stall/x HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + acme("") + "\r\n\r\n")
+                    .getBytes(StandardCharsets.ISO_8859_1));
+            requestId = requestId(readHead(client.getInputStream()));
+            client.setSoLinger(true, 0);
+        }
+        await().atMost(Duration.ofSeconds(10)).until(() -> audit.forRequest(requestId).isPresent());
+        assertThat(errorCode(requestId)).as("a write failure, not the upstream idle timeout").isEqualTo("upstream.stream_interrupted");
+    }
+
+    static String readHead(InputStream in) throws IOException {
+        StringBuilder head = new StringBuilder();
+        for (int b; !head.toString().endsWith("\r\n\r\n") && (b = in.read()) != -1; ) {
+            head.append((char) b);
+        }
+        return head.toString();
+    }
+
+    static void assertAbortedMidBody(RawHttp.Response response, int relayedBytes) {
+        assertThat(response.status()).isEqualTo(200);
+        assertThat(response.head()).containsIgnoringCase("Transfer-Encoding: chunked");
+        assertThat(response.body().chars().filter(c -> c == 'x').count()).as("bytes relayed before the failure").isEqualTo(relayedBytes);
+        assertThat(response.body()).as("no terminating chunk, so the client can't mistake it for complete").doesNotEndWith("0\r\n\r\n");
+        assertThat(response.body()).as("no error page appended to the body").doesNotContain("{");
+    }
+
+    static String requestId(RawHttp.Response response) {
+        return requestId(response.head());
+    }
+
+    static String requestId(String head) {
+        return head.lines().filter(l -> l.regionMatches(true, 0, "X-Request-Id:", 0, 13))
+                .map(l -> l.substring(13).trim()).findFirst().orElseThrow();
+    }
+
+    static String errorCode(String requestId) {
+        return audit.forRequest(requestId).orElseThrow().path("error_code").asString();
     }
 
     @Test

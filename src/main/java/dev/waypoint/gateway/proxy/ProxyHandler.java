@@ -13,7 +13,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
@@ -31,6 +30,7 @@ public class ProxyHandler {
 
     public static final String UNAVAILABLE = "upstream.unavailable";
     public static final String TIMEOUT = "upstream.timeout";
+    public static final String STREAM_INTERRUPTED = "upstream.stream_interrupted";
     public static final String IDENTITY_HEADER = "X-Gateway-Identity";
 
     private static final Logger log = LoggerFactory.getLogger(ProxyHandler.class);
@@ -41,15 +41,17 @@ public class ProxyHandler {
     private final UpstreamAddressPolicy addressPolicy;
     private final IdentityTokenMinter minter;
     private final ProblemWriter problems;
+    private final IdleTimeoutRelay bodyRelay;
     private final long maxRequestBytes;
 
     public ProxyHandler(UpstreamClient client, UpstreamSelector selector, UpstreamAddressPolicy addressPolicy,
-                        IdentityTokenMinter minter, ProblemWriter problems, long maxRequestBytes) {
+                        IdentityTokenMinter minter, ProblemWriter problems, IdleTimeoutRelay bodyRelay, long maxRequestBytes) {
         this.client = client;
         this.selector = selector;
         this.addressPolicy = addressPolicy;
         this.minter = minter;
         this.problems = problems;
+        this.bodyRelay = bodyRelay;
         this.maxRequestBytes = maxRequestBytes;
     }
 
@@ -93,7 +95,7 @@ public class ProxyHandler {
             fail(ctx, response, Rejection.of(502, UNAVAILABLE, "upstream is unavailable"));
             return;
         }
-        relay(ctx, upstream, response);
+        relay(ctx, route, upstream, response);
     }
 
     static URI targetUri(URI base, Route route, String canonicalPath, String rawQuery) {
@@ -150,7 +152,7 @@ public class ProxyHandler {
         return request.getScheme();
     }
 
-    private void relay(RequestContext ctx, HttpResponse<InputStream> upstream, HttpServletResponse response) throws IOException {
+    private void relay(RequestContext ctx, Route route, HttpResponse<InputStream> upstream, HttpServletResponse response) throws IOException {
         ctx.upstreamStatus(upstream.statusCode());
         response.setStatus(upstream.statusCode());
         for (Map.Entry<String, String> header : HeaderPolicy.responseHeaders(upstream.headers())) {
@@ -158,13 +160,29 @@ public class ProxyHandler {
         }
         response.setHeader("X-Request-Id", ctx.requestId());
         try (InputStream body = upstream.body()) {
-            OutputStream out = response.getOutputStream();
-            body.transferTo(out);
-            out.flush();
+            bodyRelay.copy(body, response.getOutputStream(), Duration.ofMillis(route.timeoutMs()));
+            response.flushBuffer();
+        } catch (IdleTimeoutRelay.IdleTimeoutException e) {
+            log.warn("Upstream body idle on route {} ({}): {}", route.id(), ctx.requestId(), e.getMessage());
+            abandon(ctx, response, Rejection.of(504, TIMEOUT, "upstream timed out"), TIMEOUT);
+        } catch (IdleTimeoutRelay.UpstreamReadException e) {
+            log.warn("Upstream body interrupted for {} ({})", ctx.requestId(), e.getMessage());
+            abandon(ctx, response, Rejection.of(502, UNAVAILABLE, "upstream is unavailable"), STREAM_INTERRUPTED);
         } catch (IOException e) {
-            log.warn("Response stream interrupted for {} ({})", ctx.requestId(), e.toString());
-            ctx.error("upstream.stream_interrupted");
+            log.warn("Client stream interrupted for {} ({})", ctx.requestId(), e.toString());
+            ctx.error(STREAM_INTERRUPTED);
         }
+    }
+
+    private void abandon(RequestContext ctx, HttpServletResponse response, Rejection beforeCommit, String afterCommitCode)
+            throws IOException {
+        if (response.isCommitted()) {
+            ctx.error(afterCommitCode);
+            throw new ResponseAbortedException(afterCommitCode);
+        }
+        response.reset();
+        response.setHeader("X-Request-Id", ctx.requestId());
+        fail(ctx, response, beforeCommit);
     }
 
     private void fail(RequestContext ctx, HttpServletResponse response, Rejection rejection) throws IOException {

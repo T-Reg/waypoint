@@ -21,6 +21,7 @@ import dev.waypoint.gateway.management.ShutdownDelay;
 import dev.waypoint.gateway.pipeline.GatewayPipeline;
 import dev.waypoint.gateway.pipeline.Stages;
 import dev.waypoint.gateway.proxy.ClientIpResolver;
+import dev.waypoint.gateway.proxy.IdleTimeoutRelay;
 import dev.waypoint.gateway.proxy.JdkUpstreamClient;
 import dev.waypoint.gateway.proxy.ProxyHandler;
 import dev.waypoint.gateway.proxy.UpstreamClient;
@@ -216,9 +217,15 @@ public class GatewayConfig {
     }
 
     @Bean
+    IdleTimeoutRelay idleTimeoutRelay() {
+        return new IdleTimeoutRelay();
+    }
+
+    @Bean
     ProxyHandler proxyHandler(UpstreamClient client, UpstreamSelector selector, UpstreamAddressPolicy policy,
-                              IdentityTokenMinter minter, ProblemWriter problems, GatewayProperties properties) {
-        return new ProxyHandler(client, selector, policy, minter, problems, properties.proxy().maxRequestBytes());
+                              IdentityTokenMinter minter, ProblemWriter problems, IdleTimeoutRelay bodyRelay,
+                              GatewayProperties properties) {
+        return new ProxyHandler(client, selector, policy, minter, problems, bodyRelay, properties.proxy().maxRequestBytes());
     }
 
     @Bean

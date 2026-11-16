@@ -60,13 +60,14 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 | Proxy | Identity token sent to a third-party upstream leaks tenant identifiers | Info disclosure | Per-route `forwardIdentity: false` | Implemented |
 | Proxy | Tenant token leaked to the upstream | Info disclosure | Strip `Authorization` before forwarding | Implemented |
 | Proxy | Request smuggling via hop-by-hop / `Transfer-Encoding` | Tampering | Remove hop-by-hop headers; the JDK client re-frames the body | Implemented |
+| Proxy | Upstream sends headers then stalls the body, pinning gateway connections; or a body cut off mid-stream reaches the client as if complete | DoS / Tampering | Body idle timeout (`timeoutMs` per read, 504 if nothing was sent yet); a failure after commit closes the client connection with no terminating chunk (tested) | Implemented |
 | Admin API | Tenant reaches the admin API | Elevation | Separate admin listener; admin JWT with its own key, `iss` and `aud=gateway-admin`, so customer tokens are rejected there and vice versa (tested) | Implemented |
 | Admin API | Brute-forcing or probing the admin API goes unnoticed | Repudiation | Every admin request, including auth failures, is audited | Implemented |
 | Admin API | Stolen admin token | Elevation | Short TTL (~10 min); least-privilege `admin:routes` / `admin:tenants` / `admin:keys` scopes; every change attributed to `sub` in `config_audit` | Partial |
 | Proxy | Identity token over-shares the caller's unrelated scopes with an upstream | Info disclosure | `scope` filtered by per-route `forwardScopes` (tested) | Implemented |
 | Policy | Write operation allowed with a read-only token | Elevation | Required scopes per HTTP method; methods without an entry get 405 | Implemented |
 | Admin API | SSRF via an upstream URL (metadata `169.254.169.254`, loopback, the gateway's own listeners) | Elevation | Scheme/absolute/no-userinfo/no-query validation; link-local, wildcard and multicast always denied; private and loopback denied unless a route opts in; own listeners always denied; hostname re-resolved and re-checked before every upstream call ([OWASP SSRF](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)). No true connect-time hook (see §5) | Partial |
-| Rate limiter | One tenant exhausts shared capacity | DoS | Per-tenant token bucket; body-size limit; upstream timeouts | Implemented |
+| Rate limiter | One tenant exhausts shared capacity | DoS | Per-tenant token bucket; body-size limit; upstream timeouts on both response headers and body idle time (a stalled body is closed after `timeoutMs` of silence) | Implemented |
 | Rate limiter | Scaling out multiplies a tenant's quota | Elevation / DoS | Shared Valkey sliding window enforces one quota across all instances (tested, R16–R17) | Implemented |
 | Rate limiter | Valkey outage or slowness becomes a gateway outage | DoS | 50ms command timeout; degrade to local bucket at RPM ÷ live instances; circuit breaker re-probes (tested, R18–R19) | Implemented |
 | Rate limiter | Valkey credentials leaked, or another client resets buckets | Tampering | TLS, ACL user limited to `rl:*` and script commands, credentials from env/secret | Implemented |
@@ -95,7 +96,7 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 
 **Can:**
 - Use its full quota, including bursts up to the bucket capacity.
-- Send large or slow requests up to the configured size and timeout limits.
+- Send large or slow requests up to the configured size and timeout limits. Upstream responses are bounded the same way: `timeoutMs` caps the wait for headers and each gap between body chunks.
 - Probe routes within its own allowlist.
 - Keep using a stolen or leaked token until it expires (no revocation yet).
 - Send any payload to its allowed upstreams. The gateway doesn't inspect bodies; that's the upstream's job.
@@ -121,6 +122,8 @@ See [docs/privacy.md](docs/privacy.md).
 - Config changes are eventually consistent across instances, bounded by the poll interval (default 10s) in the worst case.
 - TLS is terminated in front of the gateway; there is no mTLS to upstreams.
 - No per-tenant concurrency limit; slow requests can tie up connections up to the timeout.
+- No total response deadline, only an idle one: an upstream that trickles a byte just under every `timeoutMs` keeps a connection open. SSE or long-poll routes need a `timeoutMs` above their heartbeat interval.
+- If an upstream body fails after the response is committed, the gateway closes the client connection without a terminating chunk, so clients see an error instead of a silently truncated body. The status already sent (e.g. 200) can't be changed.
 - No body inspection or WAF.
 - Downstream service-to-service calls (second hop) have no token exchange or mTLS yet, so a downstream service must not reuse the identity token for other services.
 - Gateway identity private keys live in process memory, not a KMS/HSM.

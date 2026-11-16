@@ -34,13 +34,14 @@ flowchart TD
         P4[4. Re-resolve upstream host and re-check IPs, SSRF<br/>stream canonical re-encoded path + body, size-capped]
         P1 --> P2 --> P3 --> P4
     end
-    PROXY -->|connect error / blocked IP| R502[502 upstream.unavailable]
+    PROXY -->|connect error / blocked IP / body drops before commit| R502[502 upstream.unavailable]
     PROXY -->|chunked body over limit| R413
-    PROXY -->|timeout| R504[504 upstream.timeout]
-    PROXY -->|response| RESP[Return upstream status, headers, body]
+    PROXY -->|timeout: headers, or body idle before commit| R504[504 upstream.timeout]
+    PROXY -->|response| RESP[Return upstream status, headers, body<br/>body idle timeout = route timeoutMs per read]
+    RESP -->|body stalls or drops after commit| ABORT[Close client connection, no terminating chunk]
     PROXY -->|unexpected error| R500[500 internal]
 
-    R503b & R413 & R400 & R401 & R403a & R404 & R503 & R405 & R403b & R429 & R502 & R504 & R500 & RESP --> AUDIT[(Audit log: one JSON line, always written in finally<br/>path minimized by default: prefix + keyed HMAC)]
+    R503b & R413 & R400 & R401 & R403a & R404 & R503 & R405 & R403b & R429 & R502 & R504 & R500 & RESP & ABORT --> AUDIT[(Audit log: one JSON line, always written in finally<br/>path minimized by default: prefix + keyed HMAC)]
 
     ADMIN[Admin client] -->|admin listener + admin JWT<br/>own key, aud=gateway-admin, admin:* scopes| ADM{Admin API}
     ADM -->|bad token / missing scope| RA[401 / 403 admin.scope_missing]

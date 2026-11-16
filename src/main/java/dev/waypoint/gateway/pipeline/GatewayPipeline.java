@@ -5,6 +5,7 @@ import dev.waypoint.gateway.error.ProblemWriter;
 import dev.waypoint.gateway.error.Rejection;
 import dev.waypoint.gateway.proxy.ClientIpResolver;
 import dev.waypoint.gateway.proxy.ProxyHandler;
+import dev.waypoint.gateway.proxy.ResponseAbortedException;
 import dev.waypoint.gateway.store.GatewayState;
 import dev.waypoint.gateway.store.SnapshotHolder;
 import jakarta.servlet.http.HttpServletRequest;
@@ -57,6 +58,8 @@ public class GatewayPipeline {
             }
             ctx.allow();
             proxy.forward(ctx, response);
+        } catch (ResponseAbortedException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Unexpected error handling request {}", ctx.requestId(), e);
             ctx.error(INTERNAL);

@@ -108,7 +108,7 @@ Callers send a **customer token**: an Ed25519-signed JWT (`typ=customer+jwt`, `a
   | `forwardScopes[]` | Scope patterns copied into the identity token, e.g. `weather:*`. Defaults to the union of namespaces (the prefix before `:`) across the route's required scopes. If there are none, no scopes are forwarded. See §7a |
   | `forwardIdentity` | Whether to send `X-Gateway-Identity` (default `true`). Set it to `false` for third-party upstreams, so tenant identifiers aren't leaked to them |
   | `audience` | `aud` for the identity token sent to this route's upstream (defaults to `id`); see §7a |
-  | `timeoutMs` | Upstream timeout |
+  | `timeoutMs` | Upstream timeout: the maximum wait for response headers, and for each read of the response body (an idle timeout, so long downloads still stream) |
 
   `upstreams` is a list from day one so canary routing needs no schema change.
 - **Storage:** an immutable `RouteTable` snapshot behind an `AtomicReference`. An admin write validates the change, builds a new table, then swaps it in atomically. In-flight requests keep the snapshot they started with.
@@ -173,7 +173,8 @@ PostgreSQL is the source of truth for routes and tenants. Each instance serves f
 | Body too large | 413 | `request.too_large` |
 | Quota exceeded | 429 + `Retry-After` | `policy.quota_exceeded` |
 | Upstream connection failure | 502 | `upstream.unavailable` |
-| Upstream timeout | 504 | `upstream.timeout` |
+| Upstream timeout (headers, or body idle before anything is sent to the client) | 504 | `upstream.timeout` |
+| Upstream body fails after the response is committed | connection closed, no terminating chunk | `upstream.timeout` / `upstream.stream_interrupted` (audit only) |
 | Route's config entry invalid (§5a) | 503 | `route.unavailable` |
 | Instance still starting (no snapshot yet) | 503 | `gateway.not_ready` |
 | Unexpected error | 500 (no stack trace) | `internal` |

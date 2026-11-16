@@ -106,6 +106,7 @@ The gateway forwards request and response bodies byte-for-byte and never logs th
 - Tokens are issued by hand with a CLI and a file-based key. This stands in for a real token service: no self-service issuance, no revocation, and no key held in a hardware or cloud key store.
 - Rate limits are shared across instances through Valkey. If Valkey is unavailable, each instance enforces an approximate share of the quota instead of failing.
 - SSRF protection re-checks an upstream's resolved addresses before every call, but there's no hook at the exact moment of connection, so a narrow DNS-rebinding window remains.
+- Upstream responses have a per-route idle timeout but no total deadline, so streaming routes (SSE, long-poll) need a timeout longer than their heartbeat interval.
 - A total database outage longer than about 8.5 minutes (with default settings) makes instances report not-ready.
 - The gateway operator configures which scopes are forwarded to each upstream. Upstreams can't yet declare the scopes they need themselves.
 - Audit logs go to stdout. There's no tamper-evident store yet.
