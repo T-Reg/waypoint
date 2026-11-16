@@ -128,7 +128,7 @@ The gateway forwards request and response bodies byte-for-byte and never logs th
 - Upstream responses have a per-route idle timeout but no total deadline, so streaming routes (SSE, long-poll) need a timeout longer than their heartbeat interval.
 - A total database outage longer than about 8.5 minutes (with default settings) makes instances report not-ready.
 - The gateway operator configures which scopes are forwarded to each upstream. Upstreams can't yet declare the scopes they need themselves.
-- Audit logs go to stdout. There's no tamper-evident store yet.
+- Audit logs go to stdout. On App Platform they're forwarded to a managed OpenSearch cluster for retention and search, but there's no tamper-evident store yet.
 - The visualizer can mint customer tokens for its allowlisted tenants. When hosted, it holds a separate demo key (revocable on its own) and requires a password.
 - The DigitalOcean demo deployment turns on `X-Gateway-Instance`, which names the instance that served each response. It's off by default.
 

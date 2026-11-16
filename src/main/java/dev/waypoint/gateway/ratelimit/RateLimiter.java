@@ -8,4 +8,7 @@ public interface RateLimiter {
     Duration WINDOW = Duration.ofMinutes(1);
 
     RateDecision tryAcquire(String tenantId, int requestsPerMinute, String requestId);
+
+    /** Opens any connection the limiter needs before the instance is ready, so requests never pay for it. */
+    default void warmUp() {}
 }

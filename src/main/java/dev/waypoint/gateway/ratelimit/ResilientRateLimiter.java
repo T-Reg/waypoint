@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.util.function.IntSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.NestedExceptionUtils;
 
 /**
  * Degrade, don't fail: if the shared limiter errors or times out, enforce RPM ÷ live instances
@@ -14,6 +15,7 @@ import org.slf4j.LoggerFactory;
 public class ResilientRateLimiter implements RateLimiter {
 
     private static final Logger log = LoggerFactory.getLogger(ResilientRateLimiter.class);
+    static final int WARM_UP_ATTEMPTS = 3;
 
     private final RateLimiter shared;
     private final RateLimiter fallback;
@@ -50,6 +52,27 @@ public class ResilientRateLimiter implements RateLimiter {
         }
         int share = Math.max(1, requestsPerMinute / Math.max(1, liveInstances.getAsInt()));
         return fallback.tryAcquire(tenantId, share, requestId);
+    }
+
+    /**
+     * A cold first connection (DNS, TLS, client init) can exceed the connect timeout; retrying runs warm.
+     * If the shared limiter stays unreachable, start degraded rather than stall the first requests.
+     */
+    @Override
+    public void warmUp() {
+        RuntimeException failure = null;
+        for (int attempt = 0; attempt < WARM_UP_ATTEMPTS; attempt++) {
+            try {
+                shared.warmUp();
+                nextProbe = null;
+                return;
+            } catch (RuntimeException e) {
+                failure = e;
+            }
+        }
+        log.warn("Shared rate limiter unreachable at startup; starting degraded (RPM / live instances): {}",
+                NestedExceptionUtils.getMostSpecificCause(failure).getMessage());
+        nextProbe = clock.instant().plus(probeInterval);
     }
 
     public boolean isDegraded() {

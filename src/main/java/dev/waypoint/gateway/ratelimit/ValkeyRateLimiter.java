@@ -5,6 +5,8 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 
@@ -37,6 +39,11 @@ public class ValkeyRateLimiter implements RateLimiter {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    @Override
+    public void warmUp() {
+        redis.execute((RedisCallback<String>) RedisConnection::ping);
     }
 
     /** {@code nowMs < 0} uses the Valkey server clock; tests pass an explicit time. */

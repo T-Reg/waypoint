@@ -1,6 +1,7 @@
 package dev.waypoint.gateway.ratelimit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.waypoint.gateway.support.Containers;
 import java.util.UUID;
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -80,5 +82,18 @@ class ValkeyRateLimiterIT {
         assertThat(at("iso-a", 1, T0).allowed()).isTrue();
         assertThat(at("iso-b", 1, T0).allowed()).isTrue();
         assertThat(at("iso-a", 1, T0).allowed()).isFalse();
+    }
+
+    @Test
+    void warmUpConnectsToValkeyAndFailsWhenUnreachable() {
+        limiter.warmUp();
+        LettuceConnectionFactory nowhere = new LettuceConnectionFactory(Containers.VALKEY.getHost(), 1);
+        nowhere.afterPropertiesSet();
+        try {
+            assertThatThrownBy(new ValkeyRateLimiter(new StringRedisTemplate(nowhere))::warmUp)
+                    .isInstanceOf(RedisConnectionFailureException.class);
+        } finally {
+            nowhere.destroy();
+        }
     }
 }

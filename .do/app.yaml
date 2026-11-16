@@ -7,19 +7,8 @@ alerts:
   - rule: DEPLOYMENT_FAILED
   - rule: DOMAIN_FAILED
 
-# Attaching the clusters adds the app to their trusted sources and enables the ${pg.*} / ${valkey.*} bindings.
-databases:
-  - name: pg
-    engine: PG
-    production: true
-    cluster_name: waypoint-pg
-    db_name: waypoint
-    db_user: waypoint_app
-  - name: valkey
-    engine: VALKEY
-    production: true
-    cluster_name: waypoint-valkey
-
+# No `databases:` block: App Platform counts attached clusters against the new-database limit.
+# Connection values are filled in directly; add the app to each cluster's trusted sources by hand.
 ingress:
   rules:
     # Most specific prefix first. The prefix is stripped, so the visualizer serves itself at "/".
@@ -46,13 +35,14 @@ services:
     http_port: 8080
     # Admin (8081) and management (8082) are reachable only from components of this app.
     internal_ports: [8081, 8082]
+    # JVM start (~20s on a shared vCPU) plus migrations and key registration must fit in delay + period × threshold.
     health_check:
       port: 8082
       http_path: /actuator/health/readiness
-      initial_delay_seconds: 10
+      initial_delay_seconds: 40
       period_seconds: 5
       timeout_seconds: 2
-      failure_threshold: 3
+      failure_threshold: 6
     liveness_health_check:
       port: 8082
       http_path: /actuator/health/liveness
@@ -67,17 +57,17 @@ services:
     envs:
       - key: DATABASE_URL
         scope: RUN_TIME
-        value: jdbc:postgresql://${pg.HOSTNAME}:${pg.PORT}/${pg.DATABASE}?sslmode=verify-full&sslfactory=org.postgresql.ssl.SingleCertValidatingFactory&sslfactoryarg=env:DATABASE_CA_CERT
+        value: jdbc:postgresql://REPLACE_ME_pg_host:25060/waypoint?sslmode=verify-full&sslfactory=org.postgresql.ssl.SingleCertValidatingFactory&sslfactoryarg=env:DATABASE_CA_CERT
       - key: DATABASE_CA_CERT
         scope: RUN_TIME
-        value: ${pg.CA_CERT}
+        value: REPLACE_ME_pg_ca_cert_pem
       - key: DATABASE_USERNAME
         scope: RUN_TIME
-        value: ${pg.USERNAME}
+        value: waypoint_app
       - key: DATABASE_PASSWORD
         scope: RUN_TIME
         type: SECRET
-        value: ${pg.PASSWORD}
+        value: REPLACE_ME_waypoint_app_password
       - key: GATEWAY_STORE_MIGRATION_USERNAME
         scope: RUN_TIME
         value: waypoint_migrator
@@ -88,7 +78,7 @@ services:
       - key: VALKEY_URL
         scope: RUN_TIME
         type: SECRET
-        value: ${valkey.DATABASE_URL}
+        value: REPLACE_ME_valkey_rediss_url
       - key: GATEWAY_AUDIT_HMAC_KEY
         scope: RUN_TIME
         type: SECRET
@@ -107,6 +97,12 @@ services:
       - key: GATEWAY_EXPOSE_INSTANCE_HEADER
         scope: RUN_TIME
         value: "true"
+    # Runtime logs (including audit lines) are copied to Managed OpenSearch; the cluster must exist first.
+    log_destinations:
+      - name: audit-opensearch
+        open_search:
+          cluster_name: waypoint-logs
+          index_name: waypoint-logs
 
   - name: upstream
     github:
