@@ -17,7 +17,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.toxiproxy.ToxiproxyContainer;
 
-/** R16–R19: one quota across all instances, stable across scaling, degraded (not failed) when Valkey is down or slow. */
+/** R16–R19, R23: one quota across all instances, stable across scaling, connected before ready, degraded (not failed) when Valkey is down or slow. */
 class SharedQuotaIT extends ResilienceSupport {
 
     static List<Integer> fire(List<TestGateway> gateways, int count) {
@@ -49,6 +49,14 @@ class SharedQuotaIT extends ResilienceSupport {
         assertThat(count(statuses, 200)).isEqualTo(60);
         assertThat(count(statuses, 429)).isEqualTo(40);
         assertThat(upstreamCount()).isEqualTo(60);
+    }
+
+    @Test
+    void r23_instanceConnectsToValkeyBeforeItIsReady() throws Exception {
+        TestGateway a = start(node("a").property("spring.data.redis.client-name", "r23-a"));
+        assertThat(Containers.VALKEY.execInContainer("valkey-cli", "CLIENT", "LIST").getStdout())
+                .as("connected during startup, before any request").contains("name=r23-a");
+        assertThat(a.status().path("rateLimiter").asString()).isEqualTo("normal");
     }
 
     @Test

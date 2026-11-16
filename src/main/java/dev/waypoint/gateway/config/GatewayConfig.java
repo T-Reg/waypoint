@@ -163,9 +163,10 @@ public class GatewayConfig {
 
     @Bean
     GatewayBootstrap gatewayBootstrap(Migrator migrator, Seeder seeder, PostgresConfigStore store, SnapshotBuilder builder,
-                                      SnapshotHolder holder, KeyService keys, ConfigSync sync, GatewayState state,
-                                      GatewayProperties properties) {
-        return new GatewayBootstrap(migrator, seeder, store, builder, holder, keys, sync, state, properties.store().startupRetryMax());
+                                      SnapshotHolder holder, KeyService keys, ConfigSync sync, RateLimiter rateLimiter,
+                                      GatewayState state, GatewayProperties properties) {
+        return new GatewayBootstrap(migrator, seeder, store, builder, holder, keys, sync, rateLimiter, state,
+                properties.store().startupRetryMax());
     }
 
     @Bean

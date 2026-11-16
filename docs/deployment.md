@@ -10,10 +10,12 @@ Internet ──HTTPS──► App Platform edge (TLS, load balancer, health chec
                           ▼
               gateway service × 2  (:8080 public; :8081 admin and :8082 management are internal_ports)
                 │            │                 │
-     private network     HTTPS            TLS, trusted sources = this app
+     private network     HTTPS            TLS, trusted sources = this app (step 8)
                 ▼            ▼                 ▼
      upstream service   public API      Managed PostgreSQL 16 (config store)
      (WireMock, internal) (e.g. httpbin) Managed Valkey 8 (shared quotas)
+
+  gateway stdout (app + audit logs) ──App Platform log forwarding──► Managed OpenSearch (waypoint-logs)
 ```
 
 | Local stack | On DigitalOcean |
@@ -25,7 +27,7 @@ Internet ──HTTPS──► App Platform edge (TLS, load balancer, health chec
 | Seed file | None. Routes and tenants are created through the admin API (step 6) |
 | Admin port on localhost | Internal port only; reached from the App Platform console |
 
-Approximate cost: two `apps-s-1vcpu-1gb` gateways (about $24/mo), one small upstream (about $5/mo), and 1 GB PostgreSQL and Valkey clusters (about $15/mo each). Check current pricing, and tear everything down when you're finished (step 8).
+Approximate cost: two `apps-s-1vcpu-1gb` gateways (about $24/mo), one small upstream (about $5/mo), 1 GB PostgreSQL and Valkey clusters (about $15/mo each), and a 2 GB OpenSearch cluster for logs. Check current pricing, and tear everything down when you're finished (step 8).
 
 ## 0. Prerequisites
 
@@ -33,6 +35,7 @@ Approximate cost: two `apps-s-1vcpu-1gb` gateways (about $24/mo), one small upst
 brew install doctl libpq jq yq && brew link --force libpq
 doctl auth init --context waypoint && doctl auth switch --context waypoint
 doctl account get
+setopt interactivecomments      # zsh: treat "# ..." in pasted commands as comments
 ```
 
 Use one region throughout. App Platform regions map to a single datacenter ([table](https://docs.digitalocean.com/products/app-platform/how-to/enable-vpc/)). This guide uses `sfo` (app) and `sfo3` (databases).
@@ -64,6 +67,18 @@ doctl databases user create $PG_ID waypoint_app
 
 `doctl` masks passwords (`********`). Copy them from the control panel instead: **Databases → cluster → Overview → Connection Details → show**, and **Users & Databases → show** for each user.
 
+### Log cluster (Managed OpenSearch)
+
+The app spec forwards the gateway's runtime logs, audit entries included, to this cluster ([log forwarding](https://docs.digitalocean.com/products/app-platform/how-to/forward-logs/)). Create it before the app:
+
+```bash
+doctl databases create waypoint-logs --engine opensearch --version 2.19 --region sfo3 --size db-s-1vcpu-2gb --num-nodes 1
+LOG_ID=<id>
+doctl databases user reset $LOG_ID doadmin    # the create output prints the password in the URI
+```
+
+App Platform can't forward to an OpenSearch cluster that has trusted sources enabled, so leave this cluster's trusted sources **empty**. It is then reachable from the internet, protected by TLS and the `doadmin` password. The forwarder authenticates through `cluster_name`, so it needs no password in the spec. Only runtime logs are forwarded, and delivery is best-effort.
+
 ## 3. PostgreSQL roles
 
 Connect as `doadmin` (host from Connection Details; paste the password when prompted):
@@ -81,10 +96,23 @@ GRANT USAGE ON SCHEMA public TO waypoint_app;                -- the V2 migration
 
 `waypoint_app` must exist before the first boot, because V2's grants run only once. If it's missing, the gateway refuses to migrate, stays not-ready and logs `App role 'waypoint_app' does not exist` (tested by R22).
 
-Save the migrator password for step 5:
+Save the connection values for step 5. Copy each password from the panel first, then run its line:
 
 ```bash
-(umask 077; pbpaste > ~/waypoint-prod-keys/pg-migrator.pw)   # after copying it from the panel
+K=~/waypoint-prod-keys
+(umask 077; pbpaste > $K/pg-migrator.pw)     # waypoint_migrator password
+(umask 077; pbpaste > $K/pg-app.pw)          # waypoint_app password
+read VK_HOST VK_PORT <<< "$(doctl databases connection $VK_ID --format Host,Port --no-header)"
+(umask 077; printf 'rediss://default:%s@%s:%s' "$(pbpaste)" "$VK_HOST" "$VK_PORT" > $K/valkey.url)   # Valkey password
+doctl databases get-ca $PG_ID --format Certificate --no-header > $K/pg-ca.crt   # already PEM; don't base64-decode
+openssl x509 -in $K/pg-ca.crt -noout -subject  # "... Project CA"
+```
+
+Before deploying, check the CA file and password with the same `verify-full` mode the gateway uses. This catches a bad CA file or password in seconds instead of after a failed deploy:
+
+```bash
+PGPASSWORD="$(cat $K/pg-app.pw)" psql \
+  "host=<pg host> port=25060 user=waypoint_app dbname=waypoint sslmode=verify-full sslrootcert=$K/pg-ca.crt" -c 'select current_user'
 ```
 
 ## 4. Authorize GitHub
@@ -98,29 +126,39 @@ Fill a git-ignored copy of the spec:
 ```bash
 cp .do/app.yaml .do/app.local.yaml
 K=~/waypoint-prod-keys
-export MIGRATOR_PW="$(cat $K/pg-migrator.pw)" HMAC="$(cat $K/audit-hmac.key)" \
+export PG_HOST='<pg host>' \
+       PG_CA="$(cat $K/pg-ca.crt)" APP_PW="$(cat $K/pg-app.pw)" MIGRATOR_PW="$(cat $K/pg-migrator.pw)" \
+       VK_URL="$(cat $K/valkey.url)" HMAC="$(cat $K/audit-hmac.key)" \
        ISSUER_JWK="$(jq -c . $K/issuer.public.jwk.json)" ADMIN_JWK="$(jq -c . $K/admin.public.jwk.json)"
 yq -i '
+  (.services[0].envs[] | select(.key == "DATABASE_URL")).value |= sub("REPLACE_ME_pg_host", strenv(PG_HOST)) |
+  (.services[0].envs[] | select(.key == "DATABASE_CA_CERT")).value = strenv(PG_CA) |
+  (.services[0].envs[] | select(.key == "DATABASE_PASSWORD")).value = strenv(APP_PW) |
   (.services[0].envs[] | select(.key == "GATEWAY_STORE_MIGRATION_PASSWORD")).value = strenv(MIGRATOR_PW) |
+  (.services[0].envs[] | select(.key == "VALKEY_URL")).value = strenv(VK_URL) |
   (.services[0].envs[] | select(.key == "GATEWAY_AUDIT_HMAC_KEY")).value = strenv(HMAC) |
   (.services[0].envs[] | select(.key == "GATEWAY_CUSTOMER_PUBLIC_JWK")).value = strenv(ISSUER_JWK) |
   (.services[0].envs[] | select(.key == "GATEWAY_ADMIN_PUBLIC_JWK")).value = strenv(ADMIN_JWK)
 ' .do/app.local.yaml
-unset MIGRATOR_PW HMAC
-grep -c REPLACE_ME .do/app.local.yaml        # expect 0
+unset APP_PW MIGRATOR_PW VK_URL HMAC
+grep -v '^#' .do/app.local.yaml | grep -c REPLACE_ME   # expect 0
+yq '.services[0].envs[] | select(.value == "" or .value == null) | .key' .do/app.local.yaml   # expect no output (a missing file leaves a value empty)
 
-doctl apps spec validate .do/app.local.yaml
-doctl apps create --spec .do/app.local.yaml
-rm .do/app.local.yaml                        # DO stores the secrets encrypted; `doctl apps spec get` returns them as EV[...]
+doctl apps spec validate .do/app.local.yaml > /dev/null && echo "spec valid"
 ```
 
-The spec wires the database connections through [bindable variables](https://docs.digitalocean.com/products/app-platform/how-to/use-environment-variables/):
-- `DATABASE_URL` uses `sslmode=verify-full` with the JDBC driver's `SingleCertValidatingFactory`, which reads the cluster CA from `DATABASE_CA_CERT` (`${pg.CA_CERT}`), so no certificate file is needed.
-- `DATABASE_USERNAME`/`PASSWORD` come from `db_user: waypoint_app`.
-- `VALKEY_URL` is `${valkey.DATABASE_URL}` (`rediss://`, which uses a Let's Encrypt certificate trusted by the JVM).
-- Attaching both clusters adds the app to their trusted sources.
+`spec validate` prints the spec back with every secret filled in, so its output goes to `/dev/null`. Don't share it.
 
-If `spec validate` rejects the `VALKEY` database engine, take that entry out of `databases`. Then set `VALKEY_URL` by hand to `rediss://default:<password>@<host>:<port>`, and add the app to the Valkey cluster's trusted sources yourself.
+```bash
+doctl apps create --spec .do/app.local.yaml && rm .do/app.local.yaml
+```
+
+Once the app exists, DigitalOcean stores the secrets encrypted (`doctl apps spec get` returns them as `EV[...]`).
+
+How the connections are set up:
+- `DATABASE_URL` uses `sslmode=verify-full` with the JDBC driver's `SingleCertValidatingFactory`, which reads the cluster CA from `DATABASE_CA_CERT`, so no certificate file is needed.
+- `VALKEY_URL` is `rediss://` with a Let's Encrypt certificate that the JVM already trusts.
+- The spec has no `databases:` block. App Platform counts each attached cluster as a new database against the account's database limit, even when the cluster already exists. So the values are filled in directly, and trusted sources are added by hand in step 8.
 
 Follow the build and deploy:
 
@@ -175,13 +213,15 @@ for i in $(seq 70); do curl -s -o /dev/null -w '%{http_code}\n' -H "Authorizatio
 doctl apps logs $APP_ID gateway --type run | grep '"tenant_id"' | tail -3   # audit entries
 ```
 
+Check that audit entries reached OpenSearch: open **Databases → waypoint-logs → OpenSearch Dashboards**, create an index pattern for `waypoint-logs*`, and search for `tenant_id`.
+
 Zero-downtime deploy: keep a request loop running against `$APP_URL/weather/x` while running `doctl apps create-deployment $APP_ID`. The drain, readiness and graceful shutdown should produce no errors.
 
 ## 8. Hardening and teardown
 
-- **Trusted sources:** confirm both clusters list only the app (**Settings → Trusted sources**). Add your own IP only temporarily, when you need `psql`.
+- **Trusted sources:** on the PostgreSQL and Valkey clusters (not `waypoint-logs`, see step 2), go to **Settings → Trusted sources → Edit** and add the `waypoint` app. Until you do, any IP can try to connect. Add your own IP only temporarily, when you need `psql`.
 - **Valkey eviction policy:** if the cluster offers one, choose `noeviction`. Under memory pressure the limiter then degrades to local quotas instead of silently forgetting a tenant's window.
-- **Alerts and logs:** add app alerts (CPU, memory, restart count) and database alerts. Forward logs to a log destination so audit entries are kept beyond App Platform's log buffer.
+- **Alerts:** add app alerts (CPU, memory, restart count) and database alerts. Logs are already forwarded to `waypoint-logs` (step 2).
 - **Deploys:** `deploy_on_push` is off. Run `doctl apps create-deployment $APP_ID` after CI is green on `main`.
 - **Optional:** a custom domain (**Settings → Domains**), and VPC egress so the app reaches the databases on private hostnames.
 
@@ -191,10 +231,12 @@ Teardown:
 doctl apps delete $APP_ID
 doctl databases delete $PG_ID
 doctl databases delete $VK_ID
+doctl databases delete $LOG_ID
 ```
 
 ## Known gaps on this platform
 
 - **Valkey `default` user:** leaked credentials give full access to the cluster. Mitigations: a cluster dedicated to the gateway, TLS and trusted sources.
 - **Client IP:** App Platform sends the client IP in `do-connecting-ip` and the ingress IP in `X-Forwarded-For` ([DO support](https://docs.digitalocean.com/support/where-can-i-find-the-client-ip-address-of-a-request-connecting-to-my-app)). The gateway reads only `X-Forwarded-For`, so the audit `client_ip` is the ingress address.
+- **Log cluster exposure:** log forwarding requires trusted sources to be off on `waypoint-logs`, so it is reachable from the internet behind TLS and the `doadmin` password. A third-party destination (Better Stack, Papertrail) avoids this.
 - **Internal ports:** any component of the app can reach the admin and management ports. The admin API still requires an admin JWT.

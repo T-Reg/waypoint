@@ -1,7 +1,5 @@
 # Security Posture & Threat Model
 
-Status: **reflects the implementation.** Update with every change to auth, routing, policy, proxy headers, the audit log or the admin API. "Implemented" rows are covered by the tests listed in §6.
-
 The structure follows the [Four Question Framework](https://shostack.org/files/papers/The_Four_Question_Framework.pdf).
 
 ## 1. What are we working on?
@@ -69,14 +67,15 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 | Policy | Write operation allowed with a read-only token | Elevation | Required scopes per HTTP method; methods without an entry get 405 | Implemented |
 | Admin API | SSRF via an upstream URL (metadata `169.254.169.254`, loopback, the gateway's own listeners) | Elevation | Scheme/absolute/no-userinfo/no-query validation; link-local, wildcard and multicast always denied; private and loopback denied unless a route opts in; own listeners always denied; hostname re-resolved and re-checked before every upstream call ([OWASP SSRF](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)). No true connect-time hook (see §5) | Partial |
 | Rate limiter | One tenant exhausts shared capacity | DoS | Per-tenant token bucket; body-size limit; upstream timeouts on both response headers and body idle time (a stalled body is closed after `timeoutMs` of silence) | Implemented |
-| Rate limiter | Scaling out multiplies a tenant's quota | Elevation / DoS | Shared Valkey sliding window enforces one quota across all instances (tested, R16–R17) | Implemented |
+| Rate limiter | Scaling out multiplies a tenant's quota | Elevation / DoS | Shared Valkey sliding window enforces one quota across all instances (tested, R16–R17); each instance connects to Valkey before it reports ready, so a new instance doesn't count locally on a cold connect (R23) | Implemented |
 | Rate limiter | Valkey outage or slowness becomes a gateway outage | DoS | 50ms command timeout; degrade to local bucket at RPM ÷ live instances; circuit breaker re-probes (tested, R18–R19) | Implemented |
 | Rate limiter | Valkey credentials leaked, or another client resets buckets | Tampering | TLS, credentials from env/secret, trusted sources. ACL user limited to `rl:*` and script commands where supported (Compose); DigitalOcean Managed Valkey allows only the `default` user, so it uses a cluster dedicated to the gateway | Partial |
 | Rate limiter | Unbounded bucket map growth | DoS | Buckets keyed only by authenticated, known tenants | Implemented |
 | Audit | Log injection / tokens in logs | Tampering / Info disclosure | Structured JSON encoder; tokens, bodies and query strings never logged | Implemented |
 | Audit | Logs reveal end-user behavior (e.g. location in the path) | Info disclosure | Path minimized **by default** (matched prefix + keyed HMAC); raw path only on per-tenant opt-in | Implemented |
 | Audit | Tenant denies having made requests | Repudiation | Request ID and tenant ID on every entry | Implemented |
-| Audit | Audit log altered or deleted | Tampering | Structured stdout only; shipping to an append-only store is a known gap | Gap |
+| Audit | Audit log altered or deleted | Tampering | Structured stdout; on App Platform, forwarded to Managed OpenSearch outside the gateway's control. Not tamper-evident: `doadmin` can delete indexes, and forwarding is best-effort | Partial |
+| Audit | Log cluster reachable from the internet (forwarding requires trusted sources off) | Info disclosure / Tampering | TLS and `doadmin` password, rotated after creation; a third-party destination avoids it | Partial |
 | Public listener | Unauthenticated flood (no tenant, so no quota) fills CPU and audit volume | DoS | Cheap rejection before any DB or Valkey call; network-level rate limiting/DDoS protection belongs to the LB/edge (known gap) | Partial |
 | Admin API | Admin and customer trust roots accidentally share a key | Elevation | Startup fails if the admin and customer key sets share a key, issuer or audience | Implemented |
 | Admin API | Typo in a security flag silently ignored (e.g. `allowPrivateNetwrok`) | Tampering | Unknown JSON fields rejected with 400 | Implemented |
@@ -112,7 +111,8 @@ See [docs/privacy.md](docs/privacy.md).
 ## 5. Known gaps / accepted risks
 - The token issuer is a manual CLI with a file-based key, standing in for a real token service. There is no self-service issuance, no revocation, and no HSM/KMS-backed key. See [docs/identity.md §1](docs/identity.md#1-authentication-customer-and-admin-tokens).
 - No per-token revocation before `exp`. Disabling or deleting a tenant revokes all its tokens within the propagation bound.
-- Audit logs go to stdout. There's no append-only or tamper-evident store yet.
+- Audit logs go to stdout. On App Platform they're forwarded to Managed OpenSearch, but that store isn't append-only or tamper-evident, and delivery is best-effort.
+- App Platform can't forward to an OpenSearch cluster with trusted sources on, so the log cluster is reachable from the internet behind TLS and a password.
 - No network-level rate limiting or DDoS protection for unauthenticated traffic; that's expected from the LB/edge.
 - SSRF re-checks resolve the upstream host before each call, but the JDK `HttpClient` has no connect hook. A pooled keep-alive connection or a DNS-cache expiry between check and connect leaves a narrow DNS-rebinding window.
 - A total DB outage longer than `key-stale-after − token-ttl − skew` (≈ 8.5 min by default) makes every instance report not-ready, because an instance can't tell a partition from a global outage. Raising `key-stale-after` widens the window.

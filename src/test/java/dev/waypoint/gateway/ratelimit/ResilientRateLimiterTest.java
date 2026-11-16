@@ -59,4 +59,49 @@ class ResilientRateLimiterTest {
         assertThat(crowded.tryAcquire("acme", 10, "r").allowed()).isTrue();
         assertThat(crowded.tryAcquire("acme", 10, "r").allowed()).isFalse();
     }
+
+    @Test
+    void warmUpRetriesAColdConnectAndStaysShared() {
+        AtomicInteger warmUpCalls = new AtomicInteger();
+        ResilientRateLimiter warmed = new ResilientRateLimiter(warmingShared(warmUpCalls, 1), new LocalRateLimiter(clock), () -> 3,
+                clock, Duration.ofSeconds(1));
+        warmed.warmUp();
+        assertThat(warmUpCalls.get()).isEqualTo(2);
+        assertThat(warmed.isDegraded()).isFalse();
+    }
+
+    @Test
+    void warmUpThatNeverConnectsStartsDegradedAndProbesLater() {
+        AtomicInteger warmUpCalls = new AtomicInteger();
+        ResilientRateLimiter cold = new ResilientRateLimiter(warmingShared(warmUpCalls, Integer.MAX_VALUE), new LocalRateLimiter(clock),
+                () -> 3, clock, Duration.ofSeconds(1));
+        cold.warmUp();
+        assertThat(warmUpCalls.get()).isEqualTo(ResilientRateLimiter.WARM_UP_ATTEMPTS);
+        assertThat(cold.isDegraded()).isTrue();
+
+        assertThat(cold.tryAcquire("acme", 60, "r").allowed()).isTrue();
+        assertThat(sharedCalls.get()).as("no request waits on the shared limiter before the probe interval").isZero();
+
+        clock.advance(Duration.ofSeconds(1));
+        cold.tryAcquire("acme", 60, "r");
+        assertThat(sharedCalls.get()).isEqualTo(1);
+        assertThat(cold.isDegraded()).isFalse();
+    }
+
+    /** The shared limiter's warm-up fails {@code failures} times, then succeeds. */
+    private RateLimiter warmingShared(AtomicInteger warmUpCalls, int failures) {
+        return new RateLimiter() {
+            @Override
+            public RateDecision tryAcquire(String tenantId, int requestsPerMinute, String requestId) {
+                return shared.tryAcquire(tenantId, requestsPerMinute, requestId);
+            }
+
+            @Override
+            public void warmUp() {
+                if (warmUpCalls.incrementAndGet() <= failures) {
+                    throw new IllegalStateException("connect timed out");
+                }
+            }
+        };
+    }
 }
