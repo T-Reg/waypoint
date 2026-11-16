@@ -1,0 +1,102 @@
+server:
+  port: 8080
+  shutdown: graceful
+  tomcat:
+    max-swallow-size: 2MB
+
+spring:
+  application:
+    name: waypoint
+  threads:
+    virtual:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  main:
+    banner-mode: off
+  web:
+    resources:
+      add-mappings: false
+    error:
+      whitelabel:
+        enabled: false
+  mvc:
+    problemdetails:
+      enabled: false
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/waypoint}
+    username: ${DATABASE_USERNAME:waypoint}
+    password: ${DATABASE_PASSWORD:}
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 3000
+      validation-timeout: 1000
+      initialization-fail-timeout: -1
+      data-source-properties:
+        connectTimeout: 5
+        socketTimeout: 10
+        ApplicationName: waypoint
+  data:
+    redis:
+      url: ${VALKEY_URL:redis://localhost:6379}
+      timeout: 50ms
+      connect-timeout: 200ms
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,gateway
+  health:
+    db:
+      enabled: false
+    redis:
+      enabled: false
+
+gateway:
+  listeners:
+    admin-port: 8081
+    management-port: 8082
+  auth:
+    clock-skew: 30s
+    customer:
+      issuer: ${GATEWAY_CUSTOMER_ISSUER:waypoint-issuer}
+      audience: gateway
+      public-jwk: ${GATEWAY_CUSTOMER_PUBLIC_JWK:}
+      public-jwk-file: ${GATEWAY_CUSTOMER_PUBLIC_JWK_FILE:dev-keys/issuer.public.jwk.json}
+    admin:
+      issuer: ${GATEWAY_ADMIN_ISSUER:waypoint-admin-issuer}
+      audience: gateway-admin
+      public-jwk: ${GATEWAY_ADMIN_PUBLIC_JWK:}
+      public-jwk-file: ${GATEWAY_ADMIN_PUBLIC_JWK_FILE:dev-keys/admin.public.jwk.json}
+  identity:
+    issuer: waypoint-gateway
+    token-ttl: 60s
+    heartbeat-interval: 10s
+    key-stale-after: 10m
+  audit:
+    path-hmac-key: ${GATEWAY_AUDIT_HMAC_KEY:}
+  proxy:
+    max-request-bytes: 10485760
+    connect-timeout: 5s
+    trusted-proxies: ${GATEWAY_TRUSTED_PROXIES:}
+  rate-limit:
+    mode: valkey
+    probe-interval: 1s
+  store:
+    poll-interval: 10s
+  seed:
+    if-empty: ${GATEWAY_SEED_IF_EMPTY:false}
+    file: ${GATEWAY_SEED_FILE:}
+  lifecycle:
+    shutdown-delay: ${GATEWAY_SHUTDOWN_DELAY:10s}

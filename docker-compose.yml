@@ -1,0 +1,104 @@
+# Local multi-instance stack: PostgreSQL, Valkey, two gateways behind HAProxy, and a stub upstream.
+# Run ./scripts/dev-keys.sh first; it writes keys and secrets to dev-keys/ (git-ignored).
+name: waypoint
+
+x-gateway: &gateway
+  build: .
+  image: waypoint:local
+  restart: unless-stopped
+  stop_grace_period: 40s
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  environment: &gateway-env
+    DATABASE_URL: jdbc:postgresql://postgres:5432/waypoint
+    DATABASE_USERNAME: waypoint_app
+    DATABASE_PASSWORD: ${APP_DB_PASSWORD:?run scripts/dev-keys.sh}
+    GATEWAY_STORE_MIGRATION_USERNAME: waypoint_migrator
+    GATEWAY_STORE_MIGRATION_PASSWORD: ${MIGRATOR_DB_PASSWORD:?run scripts/dev-keys.sh}
+    VALKEY_URL: redis://gateway:${VALKEY_PASSWORD:?run scripts/dev-keys.sh}@valkey:6379
+    GATEWAY_AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:?run scripts/dev-keys.sh}
+    GATEWAY_CUSTOMER_PUBLIC_JWK_FILE: /keys/issuer.public.jwk.json
+    GATEWAY_ADMIN_PUBLIC_JWK_FILE: /keys/admin.public.jwk.json
+    GATEWAY_SEED_IF_EMPTY: "true"
+    GATEWAY_SEED_FILE: file:/config/seed.yaml
+    GATEWAY_TRUSTED_PROXIES: 10.89.0.0/24
+    # >= HAProxy check interval x fall count, so the LB stops routing before the drain starts.
+    GATEWAY_SHUTDOWN_DELAY: 5s
+  volumes:
+    - ./dev-keys/issuer.public.jwk.json:/keys/issuer.public.jwk.json:ro
+    - ./dev-keys/admin.public.jwk.json:/keys/admin.public.jwk.json:ro
+    - ./deploy/seed.yaml:/config/seed.yaml:ro
+
+services:
+  postgres:
+    image: postgres:16.16-alpine
+    environment:
+      POSTGRES_DB: waypoint
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/dev-keys.sh}
+      MIGRATOR_DB_PASSWORD: ${MIGRATOR_DB_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    volumes:
+      - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/init-roles.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "waypoint"]
+      interval: 2s
+      retries: 30
+    networks: [backend]
+
+  valkey:
+    image: valkey/valkey:8.1.11-alpine
+    # The gateway user may only run the rate-limit script on rl:* keys.
+    command: [valkey-server,
+              --user, default, "off",
+              --user, gateway, "on", ">${VALKEY_PASSWORD}", "~rl:*",
+              +@connection, +evalsha, +eval, "+script|load", +zadd, +zremrangebyscore, +zcard, +zrange, +pexpire, +time]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "--user", "gateway", "--pass", "${VALKEY_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 2s
+      retries: 30
+    networks: [backend]
+
+  gateway-1:
+    <<: *gateway
+    environment:
+      <<: *gateway-env
+      GATEWAY_INSTANCE_ID: gateway-1
+    ports:
+      - "127.0.0.1:18081:8081"
+      - "127.0.0.1:18082:8082"
+    networks: [backend, edge]
+
+  gateway-2:
+    <<: *gateway
+    environment:
+      <<: *gateway-env
+      GATEWAY_INSTANCE_ID: gateway-2
+    ports:
+      - "127.0.0.1:28081:8081"
+      - "127.0.0.1:28082:8082"
+    networks: [backend, edge]
+
+  haproxy:
+    image: haproxy:3.2.26-alpine
+    volumes:
+      - ./deploy/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on: [gateway-1, gateway-2]
+    networks: [edge]
+
+  upstream:
+    image: wiremock/wiremock:3.13.2
+    volumes:
+      - ./deploy/upstream/mappings:/home/wiremock/mappings:ro
+    networks: [backend]
+
+networks:
+  backend: {}
+  edge:
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24

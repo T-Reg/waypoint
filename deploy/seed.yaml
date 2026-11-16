@@ -1,0 +1,28 @@
+# Applied only to an empty store (config_revision = 0); runtime changes are never overwritten.
+routes:
+  weather:
+    pathPrefix: /weather
+    upstreams:
+      - url: http://upstream:8080
+    requiredScopes:
+      GET: [weather:read]
+      POST: [weather:write]
+    audience: weather-svc
+    allowPrivateNetwork: true
+  maps:
+    pathPrefix: /maps
+    upstreams:
+      - url: http://upstream:8080
+    requiredScopes:
+      "*": [maps:read]
+    allowPrivateNetwork: true
+tenants:
+  acme:
+    allowedPathPrefixes: [/weather, /maps]
+    requestsPerMinute: 6000
+  globex:
+    allowedPathPrefixes: [/weather]
+    requestsPerMinute: 60
+  loadtest:
+    allowedPathPrefixes: [/weather]
+    requestsPerMinute: 100000

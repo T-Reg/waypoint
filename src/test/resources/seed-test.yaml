@@ -1,0 +1,11 @@
+routes:
+  weather:
+    pathPrefix: /weather
+    upstreams:
+      - url: https://93.184.216.34
+    requiredScopes:
+      GET: [weather:read]
+tenants:
+  acme:
+    allowedPathPrefixes: [/weather]
+    requestsPerMinute: 60

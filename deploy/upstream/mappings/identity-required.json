@@ -1,0 +1,25 @@
+{
+  "mappings": [
+    {
+      "priority": 1,
+      "request": {
+        "method": "ANY",
+        "urlPattern": "/.*",
+        "headers": {
+          "X-Gateway-Identity": { "matches": "^eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$" },
+          "Authorization": { "absent": true }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": { "Content-Type": "application/json" },
+        "jsonBody": { "upstream": "ok" }
+      }
+    },
+    {
+      "priority": 10,
+      "request": { "method": "ANY", "urlPattern": "/.*" },
+      "response": { "status": 400, "body": "missing gateway identity or leaked Authorization header" }
+    }
+  ]
+}

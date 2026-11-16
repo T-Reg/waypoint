@@ -1,0 +1,10 @@
+target/
+dev-keys/
+.git/
+.github/
+.claude/
+.idea/
+.vscode/
+*.md
+deploy/
+scripts/

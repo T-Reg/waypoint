@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Development token issuer: runs dev.waypoint.gateway.cli.TokenCli from the built jar.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+JAR="$ROOT/target/waypoint.jar"
+if [[ ! -f "$JAR" ]]; then
+  (cd "$ROOT" && ./mvnw -B -q package -DskipTests)
+fi
+exec java -Dloader.main=dev.waypoint.gateway.cli.TokenCli -jar "$JAR" "$@"
