@@ -96,6 +96,8 @@ gateway:
   rate-limit:
     mode: valkey
     probe-interval: 1s
+    # Must stay well below the Valkey server's idle timeout and any NAT idle timeout on the path.
+    keep-alive-interval: 10s
   store:
     poll-interval: 10s
   seed:

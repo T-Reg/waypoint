@@ -80,6 +80,7 @@ Part of the [design](design.md). Covers the shared PostgreSQL config store, prop
 - Quotas then stay approximately right, traffic keeps flowing, and the gateway logs a warning and sets a `ratelimit.degraded` metric.
 - A circuit breaker probes Valkey and switches back to shared counting on recovery.
 - The connection is opened during startup, before readiness. Opening it on the first request instead would let a cold connect (DNS, TLS, client init) exceed the 200 ms connect timeout on a new instance. That instance would then count locally while its peers counted in Valkey, briefly admitting more than RPM on every deploy and scale-up. This was seen on App Platform: 67 of 70 requests admitted at RPM 60 (R23).
+- The connection is kept busy: a `PING` every `keep-alive-interval` (10s), off the request path, plus TCP keepalive. An idle connection can be closed by the server's idle timeout or dropped silently by the network. The next request then finds it dead, times out after 50 ms and degrades the instance for a probe interval. Requests admitted while degraded aren't recorded in Valkey, so this was seen as 65 of 70 admitted at RPM 60 after 20 idle minutes (R25). A failed ping doesn't degrade the instance; the client reconnects in the background.
 - The alternatives were rejected: fail-closed would turn a cache outage into a full outage, and fail-open would remove quotas entirely.
 
 **Security:**

@@ -28,6 +28,7 @@ import dev.waypoint.gateway.proxy.ResponseStamp;
 import dev.waypoint.gateway.proxy.UpstreamClient;
 import dev.waypoint.gateway.ratelimit.LocalRateLimiter;
 import dev.waypoint.gateway.ratelimit.RateLimiter;
+import dev.waypoint.gateway.ratelimit.RateLimiterKeepAlive;
 import dev.waypoint.gateway.ratelimit.ResilientRateLimiter;
 import dev.waypoint.gateway.ratelimit.ValkeyRateLimiter;
 import dev.waypoint.gateway.routing.RouteValidator;
@@ -48,6 +49,8 @@ import java.time.Clock;
 import java.util.HexFormat;
 import java.security.SecureRandom;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.data.redis.autoconfigure.DataRedisProperties;
+import org.springframework.boot.data.redis.autoconfigure.LettuceClientOptionsBuilderCustomizer;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -181,6 +184,16 @@ public class GatewayConfig {
                 keys::liveInstances, clock, properties.rateLimit().probeInterval());
         Gauge.builder("ratelimit.degraded", limiter, l -> l.isDegraded() ? 1 : 0).register(meters);
         return limiter;
+    }
+
+    @Bean
+    RateLimiterKeepAlive rateLimiterKeepAlive(RateLimiter rateLimiter, GatewayProperties properties) {
+        return new RateLimiterKeepAlive(rateLimiter, properties.rateLimit().keepAliveInterval());
+    }
+
+    @Bean
+    LettuceClientOptionsBuilderCustomizer valkeyTcpKeepAlive(DataRedisProperties redis) {
+        return ValkeyClientOptions.tcpKeepAlive(redis.getConnectTimeout());
     }
 
     @Bean

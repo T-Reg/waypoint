@@ -13,7 +13,11 @@ import java.io.IOException;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.toxiproxy.ToxiproxyContainer;
 
@@ -57,6 +61,50 @@ class SharedQuotaIT extends ResilienceSupport {
         assertThat(Containers.VALKEY.execInContainer("valkey-cli", "CLIENT", "LIST").getStdout())
                 .as("connected during startup, before any request").contains("name=r23-a");
         assertThat(a.status().path("rateLimiter").asString()).isEqualTo("normal");
+    }
+
+    @Test
+    void r25_keepAliveStopsTheServerClosingIdleConnections() throws Exception {
+        TestGateway a = start(node("a").property("spring.data.redis.client-name", "r25-a")
+                .property("gateway.rate-limit.keep-alive-interval", "300ms"));
+        TestGateway b = start(node("b").property("spring.data.redis.client-name", "r25-b")
+                .property("gateway.rate-limit.keep-alive-interval", "300ms"));
+        seedBasics(a, 60);
+        awaitSameRevision(List.of(a, b), a.revision());
+        Set<String> before = valkeyClientIds("r25-a", "r25-b");
+        setValkeyIdleTimeout(1);
+        try {
+            await("idle past the server's timeout").pollDelay(Duration.ofMillis(2500)).atMost(Duration.ofSeconds(5)).until(() -> true);
+            assertThat(valkeyClientIds("r25-a", "r25-b")).as("same connections: never closed for idling").isEqualTo(before);
+            upstream.resetRequests();
+            List<Integer> statuses = fire(List.of(a, b), 70);
+            assertThat(count(statuses, 200)).as("exactly RPM admitted after an idle period").isEqualTo(60);
+            assertThat(count(statuses, 429)).isEqualTo(10);
+        } finally {
+            setValkeyIdleTimeout(0);
+        }
+    }
+
+    private static void setValkeyIdleTimeout(int seconds) throws Exception {
+        assertThat(Containers.VALKEY.execInContainer("valkey-cli", "CONFIG", "SET", "timeout", String.valueOf(seconds)).getStdout())
+                .contains("OK");
+    }
+
+    private static Set<String> valkeyClientIds(String... names) throws Exception {
+        Set<String> wanted = Set.of(names);
+        Set<String> ids = new TreeSet<>();
+        for (String line : Containers.VALKEY.execInContainer("valkey-cli", "CLIENT", "LIST").getStdout().split("\n")) {
+            Map<String, String> fields = new HashMap<>();
+            for (String pair : line.trim().split(" ")) {
+                String[] kv = pair.split("=", 2);
+                fields.put(kv[0], kv.length > 1 ? kv[1] : "");
+            }
+            if (wanted.contains(fields.get("name"))) {
+                ids.add(fields.get("name") + "#" + fields.get("id"));
+            }
+        }
+        assertThat(ids).as("each gateway has a Valkey connection").hasSizeGreaterThanOrEqualTo(names.length);
+        return ids;
     }
 
     @Test

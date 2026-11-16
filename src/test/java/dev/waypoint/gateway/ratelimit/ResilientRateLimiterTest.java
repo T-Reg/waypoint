@@ -88,6 +88,46 @@ class ResilientRateLimiterTest {
         assertThat(cold.isDegraded()).isFalse();
     }
 
+    @Test
+    void keepAlivePingsTheSharedLimiter() {
+        AtomicInteger pings = new AtomicInteger();
+        ResilientRateLimiter alive = new ResilientRateLimiter(pingingShared(pings, false), new LocalRateLimiter(clock), () -> 3,
+                clock, Duration.ofSeconds(1));
+        alive.keepAlive();
+        alive.keepAlive();
+        assertThat(pings.get()).isEqualTo(2);
+        assertThat(alive.isDegraded()).isFalse();
+    }
+
+    @Test
+    void failedKeepAliveNeitherThrowsNorDegrades() {
+        AtomicInteger pings = new AtomicInteger();
+        ResilientRateLimiter dead = new ResilientRateLimiter(pingingShared(pings, true), new LocalRateLimiter(clock), () -> 3,
+                clock, Duration.ofSeconds(1));
+        dead.keepAlive();
+        assertThat(pings.get()).isEqualTo(1);
+        assertThat(dead.isDegraded()).as("requests keep using the shared limiter").isFalse();
+        dead.tryAcquire("acme", 60, "r");
+        assertThat(sharedCalls.get()).isEqualTo(1);
+    }
+
+    private RateLimiter pingingShared(AtomicInteger pings, boolean fail) {
+        return new RateLimiter() {
+            @Override
+            public RateDecision tryAcquire(String tenantId, int requestsPerMinute, String requestId) {
+                return shared.tryAcquire(tenantId, requestsPerMinute, requestId);
+            }
+
+            @Override
+            public void keepAlive() {
+                pings.incrementAndGet();
+                if (fail) {
+                    throw new IllegalStateException("Redis command timed out");
+                }
+            }
+        };
+    }
+
     /** The shared limiter's warm-up fails {@code failures} times, then succeeds. */
     private RateLimiter warmingShared(AtomicInteger warmUpCalls, int failures) {
         return new RateLimiter() {

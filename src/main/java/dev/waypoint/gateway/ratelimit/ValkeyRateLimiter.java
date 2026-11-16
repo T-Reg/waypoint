@@ -46,6 +46,11 @@ public class ValkeyRateLimiter implements RateLimiter {
         redis.execute((RedisCallback<String>) RedisConnection::ping);
     }
 
+    @Override
+    public void keepAlive() {
+        warmUp();
+    }
+
     /** {@code nowMs < 0} uses the Valkey server clock; tests pass an explicit time. */
     public RateDecision tryAcquire(String tenantId, int limit, String requestId, long nowMs) {
         List<?> result = redis.execute(SCRIPT, List.of(KEY_PREFIX + tenantId),

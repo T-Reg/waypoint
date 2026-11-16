@@ -85,8 +85,9 @@ class ValkeyRateLimiterIT {
     }
 
     @Test
-    void warmUpConnectsToValkeyAndFailsWhenUnreachable() {
+    void pingsReachValkeyAndWarmUpFailsWhenUnreachable() {
         limiter.warmUp();
+        limiter.keepAlive();
         LettuceConnectionFactory nowhere = new LettuceConnectionFactory(Containers.VALKEY.getHost(), 1);
         nowhere.afterPropertiesSet();
         try {

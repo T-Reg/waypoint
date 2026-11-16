@@ -75,6 +75,16 @@ public class ResilientRateLimiter implements RateLimiter {
         nextProbe = clock.instant().plus(probeInterval);
     }
 
+    /** A failed ping doesn't degrade: the client reconnects in the background, and requests still probe as usual. */
+    @Override
+    public void keepAlive() {
+        try {
+            shared.keepAlive();
+        } catch (RuntimeException e) {
+            log.debug("Shared rate limiter keep-alive failed: {}", e.getMessage());
+        }
+    }
+
     public boolean isDegraded() {
         return nextProbe != null;
     }

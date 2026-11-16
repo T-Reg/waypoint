@@ -50,7 +50,8 @@ public record GatewayProperties(
 
     public record RateLimit(
             @DefaultValue("valkey") Mode mode,
-            @DefaultValue("1s") Duration probeInterval) {
+            @DefaultValue("1s") Duration probeInterval,
+            @DefaultValue("10s") Duration keepAliveInterval) {
 
         public enum Mode { VALKEY, LOCAL }
     }
