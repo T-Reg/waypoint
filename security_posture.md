@@ -30,66 +30,90 @@ A reverse proxy that authenticates tenants with Ed25519-signed JWTs, routes by p
 
 ## 2. What can go wrong? (STRIDE)
 
-| Element | Threat | Category | Mitigation | Status |
-|---|---|---|---|---|
-| Public listener | Unauthenticated flood (no tenant, so no quota) fills CPU and audit volume | DoS | Rejected using in-memory state only, before any DB or Valkey call; the worst case per request is one Ed25519 signature check. Not limited: there's no per-IP or pre-auth rate limit, and every rejection is still audited, so log volume grows with the flood. See [G5](#g5) | Partial |
-| Auth | Forged token / `alg: none` / algorithm confusion / token-type confusion | Spoofing | Algorithm pinned to `Ed25519` (`EdDSA`, HS*, `none` rejected); explicit `typ` per token type; single-valued `aud`; `jku`/`x5u`/`jwk` headers ignored ([RFC 8725](https://datatracker.ietf.org/doc/html/rfc8725)) | Implemented |
-| Auth | Replay of a stolen token | Spoofing | Short TTL (15 min default, 24h max at issuance); disabling the tenant revokes all its tokens within the poll interval ([G11](#g11)). No per-token revocation yet, see [G2](#g2) | Partial |
-| Auth | Token for another audience/issuer accepted | Spoofing | `iss` and `aud` required and checked | Implemented |
-| Issuer | Issuer private key stolen, so an attacker can mint a customer token for any tenant | Spoofing / Elevation | Key file kept outside the repo, and the gateway never holds it. Admin tokens use a separate key, so this doesn't grant admin. Planned: KMS/HSM-held key, `kid` rotation via JWKS. See [G1](#g1) | Partial |
-| Routing/policy | Path encoding tricks (`%2F`, `..`, `..;`, `;`, double encoding, `//`, `\`) to bypass the allowlist | Elevation | One canonical path for allowlist, matching and forwarding (re-encoded); ambiguous paths rejected with 400; property tests | Implemented |
-| Routing | Authenticated tenant maps routes outside its allowlist (404 vs 403) | Info disclosure | Allowlist checked before route lookup | Implemented |
-| Routing | Prefix confusion (`/api` matching `/apix`) | Elevation | Segment-aware matching | Implemented |
-| Policy | Write operation allowed with a read-only token | Elevation | Required scopes per HTTP method; methods without an entry get 405 | Implemented |
-| Rate limiter | One tenant exhausts shared capacity | DoS | Per-tenant token bucket; body-size limit; upstream timeouts on both response headers and body idle time (a stalled body is closed after `timeoutMs` of silence). No per-tenant concurrency limit or total response deadline, see [G13](#g13), [G14](#g14) | Partial |
-| Rate limiter | Scaling out multiplies a tenant's quota | Elevation / DoS | Shared Valkey sliding window enforces one quota across all instances (tested, R16–R17); each instance connects to Valkey before it reports ready, so a new instance doesn't count locally on a cold connect (R23) | Implemented |
-| Rate limiter | Valkey outage or slowness becomes a gateway outage | DoS | 50ms command timeout; degrade to local bucket at RPM ÷ live instances; circuit breaker re-probes (tested, R18–R19); a keep-alive ping and TCP keepalive stop an idle connection from failing the next request (R25). Quotas are approximate meanwhile, see [G9](#g9) | Implemented |
-| Rate limiter | Valkey credentials leaked, or another client resets buckets | Tampering | TLS, credentials from env/secret, trusted sources. ACL user limited to `rl:*` and script commands where supported (Compose); DigitalOcean Managed Valkey allows only the `default` user, so it uses a cluster dedicated to the gateway. See [G9](#g9) | Partial |
-| Rate limiter | Unbounded bucket map growth | DoS | Buckets keyed only by authenticated, known tenants | Implemented |
-| Proxy | Client spoofs `X-Gateway-*` identity headers to an upstream | Spoofing | Strip client `X-Gateway-*` headers; identity is sent only as a gateway-signed token | Implemented |
-| Proxy | `Connection: X-Gateway-Identity` strips the gateway's identity header | Spoofing | Hop-by-hop stripping happens before injection (tested) | Implemented |
-| Proxy | Identity token sent to a third-party upstream leaks tenant identifiers | Info disclosure | Per-route `forwardIdentity: false` | Implemented |
-| Proxy | Tenant token leaked to the upstream | Info disclosure | Strip `Authorization` before forwarding | Implemented |
-| Proxy | Request smuggling via hop-by-hop / `Transfer-Encoding` | Tampering | Remove hop-by-hop headers; the JDK client re-frames the body | Implemented |
-| Proxy | Upstream sends headers then stalls the body, pinning gateway connections; or a body cut off mid-stream reaches the client as if complete | DoS / Tampering | Body idle timeout (`timeoutMs` per read, 504 if nothing was sent yet); a failure after commit closes the client connection with no terminating chunk (tested). See [G14](#g14), [G15](#g15) | Implemented |
-| Proxy | Identity token over-shares the caller's unrelated scopes with an upstream | Info disclosure | `scope` filtered by per-route `forwardScopes` (tested). See [G20](#g20) | Implemented |
-| Proxy / Audit | Client spoofs `X-Forwarded-For`, `Forwarded` or `X-Real-IP` to fake its IP | Spoofing / Repudiation | XFF is trusted only from `trustedProxies`; inbound forwarding headers are stripped and rebuilt. On App Platform the recorded IP is the ingress, see [G10](#g10) | Implemented |
-| Upstream | Confused deputy: an internal caller claims a tenant identity, or an upstream acts for a tenant it shouldn't | Spoofing / Elevation | Signed `X-Gateway-Identity` with per-upstream `aud` and 60s TTL; upstreams verify it and do object-level authz ([G19](#g19)). Second hop: token exchange (RFC 8693) + mTLS, deferred, see [G12](#g12), [G17](#g17) | Partial |
-| Upstream | Identity token replayed to a different service | Spoofing | `aud` bound to one upstream; short `exp` | Implemented |
-| Gateway | Gateway identity key leaks, letting an attacker mint internal identities | Spoofing | Key generated in memory at startup and never written to disk; `kid` rotation via JWKS; 60s TTL limits the value of individual tokens. Keys aren't in a KMS/HSM, see [G18](#g18) | Partial |
-| JWKS | Private key material published by mistake | Info disclosure | Only public params serialized; unit test asserts no `d` | Implemented |
-| JWKS | JWKS unavailable during a DB outage or partition | DoS | Served from an in-memory last-known-good key set; keys not expired while the DB is unreachable (tested, R6, R20). Bounded, see [G7](#g7) | Implemented |
-| JWKS | JWKS response spoofed, so an upstream trusts an attacker's key | Spoofing | Served on the management listener only; upstreams fetch from a fixed configured URL over TLS and ignore `jku`/`x5u`/`jwk` token headers (tested) | Implemented |
-| JWKS | Flood of unknown `kid`s forces upstreams to refetch repeatedly | DoS | Verifier guidance: cache keys and rate-limit refetches; `Cache-Control` on the response | Implemented |
-| Audit | Log injection / tokens in logs | Tampering / Info disclosure | Structured JSON encoder; tokens, bodies and query strings never logged | Implemented |
-| Audit | Logs reveal end-user behavior (e.g. location in the path) | Info disclosure | Path minimized **by default** (matched prefix + keyed HMAC); raw path only on per-tenant opt-in | Implemented |
-| Audit | Tenant denies having made requests | Repudiation | Request ID and tenant ID on every entry | Implemented |
-| Audit | Audit log altered or deleted | Tampering | Structured stdout; on App Platform, forwarded to Managed OpenSearch outside the gateway's control. Not tamper-evident: `doadmin` can delete indexes, and forwarding is best-effort. See [G3](#g3) | Partial |
-| Audit | Log cluster reachable from the internet (forwarding requires trusted sources off) | Info disclosure / Tampering | TLS and `doadmin` password, rotated after creation; a third-party destination avoids it. See [G4](#g4) | Partial |
-| Audit | Requests Tomcat rejects before the filter chain (illegal request-line characters) leave no audit entry | Repudiation | Encoded `/` passed through to the normalizer for an audited 400; other parser-level rejections still unaudited. See [G8](#g8) | Gap |
-| Admin API | Unauthorized key rotation | Tampering | `POST /admin/keys/rotate` requires an admin JWT with `admin:keys` and isn't reachable on the public listener (tested) | Implemented |
-| Admin API | Tenant reaches the admin API | Elevation | Separate admin listener; admin JWT with its own key, `iss` and `aud=gateway-admin`, so customer tokens are rejected there and vice versa (tested) | Implemented |
-| Admin API | Brute-forcing or probing the admin API goes unnoticed | Repudiation | Every admin request, including auth failures, is audited | Implemented |
-| Admin API | Stolen admin token | Elevation | Short TTL (~10 min); least-privilege `admin:routes` / `admin:tenants` / `admin:keys` scopes; every change attributed to `sub` in `config_audit`. No per-token revocation, see [G2](#g2) | Partial |
-| Admin API | SSRF via an upstream URL (metadata `169.254.169.254`, loopback, the gateway's own listeners) | Elevation | Scheme/absolute/no-userinfo/no-query validation; link-local, wildcard and multicast always denied; private and loopback denied unless a route opts in; own listeners always denied; hostname re-resolved and re-checked before every upstream call ([OWASP SSRF](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)). No true connect-time hook, see [G6](#g6) | Partial |
-| Admin API | Admin and customer trust roots accidentally share a key | Elevation | Startup fails if the admin and customer key sets share a key, issuer or audience | Implemented |
-| Admin API | Typo in a security flag silently ignored (e.g. `allowPrivateNetwrok`) | Tampering | Unknown JSON fields rejected with 400 | Implemented |
-| Config store | Tampered DB row points a route at an attacker host | Tampering / Elevation | Least-privilege DB user, TLS (`verify-full`), upstream URLs re-validated on load, invalid entries skipped (fail closed per route) | Implemented |
-| Config store | One bad row stops instances from starting | DoS | Per-entry validation at load and startup (tested, R13) | Implemented |
-| Config store | DB credentials leaked | Elevation | Credentials from env/secret only; DDL only for the migration user; app user `INSERT`/`SELECT` only on `config_audit`; DigitalOcean trusted sources restrict network access | Implemented |
-| Config store | App role created after the first migration never gets its grants, so a fresh deploy fails in confusing ways | DoS | Migration refuses to run until the app role exists; the instance stays not-ready and logs why (tested, R22) | Implemented |
-| Config store | SQL injection via admin input | Tampering | Parameterized SQL only | Implemented |
-| Config store | Two admins overwrite each other's changes | Tampering | Optimistic locking (`If-Match` / `version`), 409 on conflict (tested, R5) | Implemented |
-| Config store | Admin denies making a change | Repudiation | Append-only `config_audit` with actor, time, and before/after values | Implemented |
-| Config store | DB outage stops traffic | DoS | Request path uses the in-memory snapshot only; DB outage only blocks admin writes (tested, R6). A total outage longer than ≈ 8.5 min makes instances not-ready, see [G7](#g7) | Partial |
-| Config store | App DB user rewrites the change history | Repudiation | `config_audit` triggers block UPDATE/DELETE/TRUNCATE for every role; the app role gets INSERT/SELECT only (tested) | Implemented |
-| Supply chain | Known-vulnerable dependency | Elevation | OSV-Scanner in CI fails the build on any known-vulnerable dependency; Boot 4.1 (supported line) with no version overrides and no ignored advisories | Implemented |
-| Visualizer | Anyone who can reach the visualizer mints customer tokens | Spoofing / Elevation | On DigitalOcean it holds only a demo key the gateway trusts alongside the issuer key (a JWK set); removing it from the set revokes the visualizer, and the real issuer key never leaves the operator. Mints only for `visualizer.allowed-tenants`, TTL ≤ 5 min; HTTP Basic gate, which the `app-platform` profile requires (startup fails without a password); bound to 127.0.0.1 in Compose | Implemented |
-| Visualizer | Visualizer used as a traffic amplifier against the gateway | DoS | ≤ 200 requests per run, ≤ 20 in flight, ≤ 3 concurrent runs; the gateway's own quotas still apply | Implemented |
-| Visualizer | Page leaks a replayable identity token | Info disclosure | Signature removed server-side before results reach the browser; only claims are shown | Implemented |
-| Visualizer | Visualizer's requests trusted as coming from a proxy, so its `X-Forwarded-For` would be believed | Spoofing | Not attached to the `edge` network (the `trustedProxies` subnet); it reaches HAProxy over a separate `client` network | Implemented |
-| Load balancer | `X-Served-By` and HAProxy stats reveal instance names | Info disclosure | Instance names only, no addresses in the header; stats on `:8404` are read-only and not published to the host. In production, drop the header at the edge if instance names are sensitive | Accepted |
-| Proxy | `X-Gateway-Instance` tells clients which instance served them (helps target one instance or map the fleet) | Info disclosure | Off by default (`gateway.proxy.expose-instance-header`); the value is a random ID, never an address; set last, so an upstream can't forge it. Enabled only on the DigitalOcean demo deployment | Accepted (demo) |
+Grouped by STRIDE category, then by element. A threat with two categories sits under the first and names the second.
+
+### S: Spoofing (can someone pretend to be someone else?)
+
+| Element | Threat | Mitigation | Status |
+|---|---|---|---|
+| Auth | Forged token, `alg: none`, algorithm or token-type confusion, or a token for another issuer/audience accepted | Algorithm pinned to `Ed25519` (`EdDSA`, HS*, `none` rejected); explicit `typ` per token type; `iss` and single-valued `aud` required and checked; `jku`/`x5u`/`jwk` headers ignored ([RFC 8725](https://datatracker.ietf.org/doc/html/rfc8725)) | Implemented |
+| Auth | Replay of a stolen token | Short TTL (15 min default, 24h max at issuance); disabling the tenant revokes all its tokens within the poll interval ([G11](#g11)). No per-token revocation yet, see [G2](#g2) | Partial |
+| Issuer | Issuer private key stolen, so an attacker can mint a customer token for any tenant *(also Elevation)* | Key file kept outside the repo, and the gateway never holds it. Admin tokens use a separate key, so this doesn't grant admin. Planned: KMS/HSM-held key, `kid` rotation via JWKS. See [G1](#g1) | Partial |
+| Proxy | Client spoofs `X-Gateway-*` identity headers to an upstream, or strips the gateway's with `Connection: X-Gateway-Identity` | Client `X-Gateway-*` headers stripped; identity is sent only as a gateway-signed token; hop-by-hop stripping happens before injection (tested) | Implemented |
+| Proxy / Audit | Client spoofs `X-Forwarded-For`, `Forwarded` or `X-Real-IP` to fake its IP *(also Repudiation)* | XFF is trusted only from `trustedProxies`; inbound forwarding headers are stripped and rebuilt. On App Platform the recorded IP is the ingress, see [G10](#g10) | Implemented |
+| Upstream | Confused deputy: an internal caller claims a tenant identity, or an upstream acts for a tenant it shouldn't *(also Elevation)* | Signed `X-Gateway-Identity` with per-upstream `aud` and 60s TTL; upstreams verify it and do object-level authz ([G19](#g19)). Second hop: token exchange (RFC 8693) + mTLS, deferred, see [G12](#g12), [G17](#g17) | Partial |
+| Upstream | Identity token replayed to a different service | `aud` bound to one upstream; short `exp` | Implemented |
+| Gateway | Gateway identity key leaks, letting an attacker mint internal identities | Key generated in memory at startup and never written to disk; `kid` rotation via JWKS; 60s TTL limits the value of individual tokens. Keys aren't in a KMS/HSM, see [G18](#g18) | Partial |
+| JWKS | JWKS response spoofed, so an upstream trusts an attacker's key | Served on the management listener only; upstreams fetch from a fixed configured URL over TLS and ignore `jku`/`x5u`/`jwk` token headers (tested) | Implemented |
+| Visualizer | Anyone who can reach the visualizer mints customer tokens *(also Elevation)* | On DigitalOcean it holds only a demo key the gateway trusts alongside the issuer key (a JWK set); removing it from the set revokes the visualizer, and the real issuer key never leaves the operator. Mints only for `visualizer.allowed-tenants`, TTL ≤ 5 min; HTTP Basic gate, which the `app-platform` profile requires (startup fails without a password); bound to 127.0.0.1 in Compose | Implemented |
+| Visualizer | Visualizer's requests trusted as coming from a proxy, so its `X-Forwarded-For` would be believed | Not attached to the `edge` network (the `trustedProxies` subnet); it reaches HAProxy over a separate `client` network | Implemented |
+
+### T: Tampering (can someone change data, requests or config?)
+
+| Element | Threat | Mitigation | Status |
+|---|---|---|---|
+| Rate limiter | Valkey credentials leaked, or another client resets buckets | TLS, credentials from env/secret, trusted sources. ACL user limited to `rl:*` and script commands where supported (Compose); DigitalOcean Managed Valkey allows only the `default` user, so it uses a cluster dedicated to the gateway. See [G9](#g9) | Partial |
+| Proxy | Request smuggling via hop-by-hop / `Transfer-Encoding` | Remove hop-by-hop headers; the JDK client re-frames the body | Implemented |
+| Audit | Log injection / tokens in logs *(also Info disclosure)* | Structured JSON encoder; tokens, bodies and query strings never logged | Implemented |
+| Audit | Audit log altered or deleted | Structured stdout; on App Platform, forwarded to Managed OpenSearch outside the gateway's control. Not tamper-evident: `doadmin` can delete indexes, and forwarding is best-effort. See [G3](#g3) | Partial |
+| Admin API | Unauthorized key rotation | `POST /admin/keys/rotate` requires an admin JWT with `admin:keys` and isn't reachable on the public listener (tested) | Implemented |
+| Admin API | Typo in a security flag silently ignored (e.g. `allowPrivateNetwrok`) | Unknown JSON fields rejected with 400 | Implemented |
+| Config store | Tampered DB row points a route at an attacker host *(also Elevation)* | Least-privilege DB user, TLS (`verify-full`), upstream URLs re-validated on load, invalid entries skipped (fail closed per route) | Implemented |
+| Config store | SQL injection via admin input | Parameterized SQL only | Implemented |
+| Config store | Two admins overwrite each other's changes | Optimistic locking (`If-Match` / `version`), 409 on conflict (tested, R5) | Implemented |
+
+### R: Repudiation (can someone deny what they did?)
+
+| Element | Threat | Mitigation | Status |
+|---|---|---|---|
+| Audit | Tenant denies having made requests | Request ID and tenant ID on every entry | Implemented |
+| Audit | Requests Tomcat rejects before the filter chain (illegal request-line characters) leave no audit entry | Encoded `/` passed through to the normalizer for an audited 400; other parser-level rejections still unaudited. See [G8](#g8) | Gap |
+| Admin API | Brute-forcing or probing the admin API goes unnoticed | Every admin request, including auth failures, is audited | Implemented |
+| Config store | Admin denies making a change | Append-only `config_audit` with actor, time, and before/after values | Implemented |
+| Config store | App DB user rewrites the change history | `config_audit` triggers block UPDATE/DELETE/TRUNCATE for every role; the app role gets INSERT/SELECT only (tested) | Implemented |
+
+### I: Information disclosure (can someone see what they shouldn't?)
+
+| Element | Threat | Mitigation | Status |
+|---|---|---|---|
+| Load balancer | `X-Served-By` and HAProxy stats reveal instance names | Instance names only, no addresses in the header; stats on `:8404` are read-only and not published to the host. In production, drop the header at the edge if instance names are sensitive | Accepted |
+| Routing | Authenticated tenant maps routes outside its allowlist (404 vs 403) | Allowlist checked before route lookup | Implemented |
+| Proxy | Identity token over-shares: tenant identifiers sent to a third-party upstream, or the caller's unrelated scopes sent to any upstream | Per-route `forwardIdentity: false`; `scope` filtered by per-route `forwardScopes` (tested). See [G20](#g20) | Implemented |
+| Proxy | Tenant token leaked to the upstream | Strip `Authorization` before forwarding | Implemented |
+| Proxy | `X-Gateway-Instance` tells clients which instance served them (helps target one instance or map the fleet) | Off by default (`gateway.proxy.expose-instance-header`); the value is a random ID, never an address; set last, so an upstream can't forge it. Enabled only on the DigitalOcean demo deployment | Accepted (demo) |
+| JWKS | Private key material published by mistake | Only public params serialized; unit test asserts no `d` | Implemented |
+| Audit | Logs reveal end-user behavior (e.g. location in the path) | Path minimized **by default** (matched prefix + keyed HMAC); raw path only on per-tenant opt-in | Implemented |
+| Audit | Log cluster reachable from the internet (forwarding requires trusted sources off) *(also Tampering)* | TLS and `doadmin` password, rotated after creation; a third-party destination avoids it. See [G4](#g4) | Partial |
+| Visualizer | Page leaks a replayable identity token | Signature removed server-side before results reach the browser; only claims are shown | Implemented |
+
+### D: Denial of service (can someone take it down or starve others?)
+
+| Element | Threat | Mitigation | Status |
+|---|---|---|---|
+| Public listener | Unauthenticated flood (no tenant, so no quota) fills CPU and audit volume | Rejected using in-memory state only, before any DB or Valkey call; the worst case per request is one Ed25519 signature check. Not limited: there's no per-IP or pre-auth rate limit, and every rejection is still audited, so log volume grows with the flood. See [G5](#g5) | Partial |
+| Rate limiter | One tenant exhausts shared capacity | Per-tenant token bucket; body-size limit; upstream timeouts on both response headers and body idle time (a stalled body is closed after `timeoutMs` of silence). No per-tenant concurrency limit or total response deadline, see [G13](#g13), [G14](#g14) | Partial |
+| Rate limiter | Valkey outage or slowness becomes a gateway outage | 50ms command timeout; degrade to local bucket at RPM ÷ live instances; circuit breaker re-probes (tested, R18–R19); a keep-alive ping and TCP keepalive stop an idle connection from failing the next request (R25). Quotas are approximate meanwhile, see [G9](#g9) | Implemented |
+| Rate limiter | Unbounded bucket map growth | Buckets keyed only by authenticated, known tenants | Implemented |
+| Proxy | Upstream sends headers then stalls the body, pinning gateway connections; or a body cut off mid-stream reaches the client as if complete *(also Tampering)* | Body idle timeout (`timeoutMs` per read, 504 if nothing was sent yet); a failure after commit closes the client connection with no terminating chunk (tested). See [G14](#g14), [G15](#g15) | Implemented |
+| JWKS | Flood of unknown `kid`s forces upstreams to refetch repeatedly | Verifier guidance: cache keys and rate-limit refetches; `Cache-Control` on the response | Implemented |
+| Config store / JWKS | DB outage or partition stops traffic or the JWKS | Request path and JWKS use in-memory state only (last-known-good snapshot and key set; keys not expired while the DB is unreachable), so a DB outage only blocks admin writes (tested, R6, R20). A total outage longer than ≈ 8.5 min makes instances not-ready, see [G7](#g7) | Partial |
+| Config store | One bad row stops instances from starting | Per-entry validation at load and startup (tested, R13) | Implemented |
+| Config store | App role created after the first migration never gets its grants, so a fresh deploy fails in confusing ways | Migration refuses to run until the app role exists; the instance stays not-ready and logs why (tested, R22) | Implemented |
+| Visualizer | Visualizer used as a traffic amplifier against the gateway | ≤ 200 requests per run, ≤ 20 in flight, ≤ 3 concurrent runs; the gateway's own quotas still apply | Implemented |
+
+### E: Elevation of privilege (can someone do more than they're allowed?)
+
+| Element | Threat | Mitigation | Status |
+|---|---|---|---|
+| Routing/policy | Path encoding tricks (`%2F`, `..`, `..;`, `;`, double encoding, `//`, `\`) to bypass the allowlist | One canonical path for allowlist, matching and forwarding (re-encoded); ambiguous paths rejected with 400; property tests | Implemented |
+| Routing | Prefix confusion (`/api` matching `/apix`) | Segment-aware matching | Implemented |
+| Policy | Write operation allowed with a read-only token | Required scopes per HTTP method; methods without an entry get 405 | Implemented |
+| Rate limiter | Scaling out multiplies a tenant's quota *(also DoS)* | Shared Valkey sliding window enforces one quota across all instances (tested, R16–R17); each instance connects to Valkey before it reports ready, so a new instance doesn't count locally on a cold connect (R23) | Implemented |
+| Admin API | Stolen admin token | Short TTL (~10 min); least-privilege `admin:routes` / `admin:tenants` / `admin:keys` scopes; every change attributed to `sub` in `config_audit`. No per-token revocation, see [G2](#g2) | Partial |
+| Admin API | SSRF via an upstream URL (metadata `169.254.169.254`, loopback, the gateway's own listeners) | Scheme/absolute/no-userinfo/no-query validation; link-local, wildcard and multicast always denied; private and loopback denied unless a route opts in; own listeners always denied; hostname re-resolved and re-checked before every upstream call ([OWASP SSRF](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)). No true connect-time hook, see [G6](#g6) | Partial |
+| Admin API | Tenant reaches the admin API, or admin and customer trust roots accidentally share a key | Separate admin listener; admin JWT with its own key, `iss` and `aud=gateway-admin`, so customer tokens are rejected there and vice versa (tested); startup fails if the two key sets share a key, issuer or audience | Implemented |
+| Config store | DB credentials leaked | Credentials from env/secret only; DDL only for the migration user; app user `INSERT`/`SELECT` only on `config_audit`; DigitalOcean trusted sources restrict network access | Implemented |
+| Supply chain | Known-vulnerable dependency | OSV-Scanner in CI fails the build on any known-vulnerable dependency; Boot 4.1 (supported line) with no version overrides and no ignored advisories | Implemented |
 
 ## 3. Malicious authenticated tenant
 
